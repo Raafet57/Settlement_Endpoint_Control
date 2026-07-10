@@ -265,8 +265,9 @@ def seed() -> dict[str, int | str]:
     with connect() as con:
         con.executescript(SCHEMA)
         con.executescript(migrate.SCHEMA_MIGRATIONS_DDL)
+        con.executescript(migrate.ENDPOINT_PROFILES_DDL)
         with con:
-            for table in ["operator_actions", "audit_events", "route_decisions", "policy_checks", "demo_scenarios", "route_policies", "settlement_endpoints", "legal_entities", "institutions", "source_manifest"]:
+            for table in ["endpoint_profiles", "operator_actions", "audit_events", "route_decisions", "policy_checks", "demo_scenarios", "route_policies", "settlement_endpoints", "legal_entities", "institutions", "source_manifest"]:
                 con.execute(f"DELETE FROM {table}")
 
             manifest = load_source_manifest()
@@ -347,8 +348,13 @@ def seed() -> dict[str, int | str]:
                 )
             con.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
 
+            # A freshly seeded DB is born at the current schema with the registry
+            # backfilled to match the 4->5 migration: one active profile per
+            # settlement endpoint, under the single server-owned synthetic tenant.
+            migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, fixed_time)
+
         counts = {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in [
-            "institutions", "legal_entities", "settlement_endpoints", "route_policies", "demo_scenarios", "policy_checks", "route_decisions", "audit_events", "operator_actions", "source_manifest", "schema_migrations"
+            "institutions", "legal_entities", "settlement_endpoints", "route_policies", "demo_scenarios", "policy_checks", "route_decisions", "audit_events", "operator_actions", "source_manifest", "schema_migrations", "endpoint_profiles"
         ]}
         counts["database"] = str(DB_PATH)
         return counts

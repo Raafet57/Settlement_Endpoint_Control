@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -25,7 +26,8 @@ EXPECTED_TABLE_COUNTS = {
     "audit_events": 18,
     "operator_actions": 0,
     "source_manifest": 4,
-    "schema_migrations": 1,
+    "schema_migrations": 2,
+    "endpoint_profiles": 1,
 }
 EXPECTED_SLUGS = {"blocked", "refreshed", "authority"}
 EXPECTED_VERDICTS = {
@@ -33,6 +35,25 @@ EXPECTED_VERDICTS = {
     "refreshed": "TOKEN_ROUTE_APPROVED_FIAT_FALLBACK_RETAINED",
     "authority": "AUTHORITY_EXPIRED_MANUAL_HOLD",
 }
+APPROVED = EXPECTED_VERDICTS["refreshed"]
+BLOCKED = EXPECTED_VERDICTS["blocked"]
+
+
+def profile_body(tag: str, *, authority: str = "current", allowlist: str = "current", payload: str = "complete") -> dict:
+    """A distinct, fully-formed synthetic endpoint-profile create body."""
+    return {
+        "institution": {"name": f"Smoke Institution {tag}", "bic": f"SMOKEBIC{tag}", "jurisdiction": "EU synthetic profile"},
+        "legal_entity": {"name": f"Smoke Entity {tag}", "lei": f"SMOKELEI{tag}", "authority_status": authority},
+        "endpoint": {
+            "wallet_address": f"0xSMOKE{tag}", "custody": "Approved custodian", "allowlist_status": allowlist,
+            "endpoint_owner": "Treasury ops queue", "endpoint_payload_status": payload,
+            "requested_rail": "Tokenized deposit", "uetr": f"SMOKE-UETR-{tag}",
+        },
+        "fallback": {
+            "fallback_rail": "Fiat SSI route", "fallback_currency": "EUR",
+            "fallback_account_mask": "DE•• •••• •••• 4400", "fallback_intermediary_bic": "INTERDEFFXXX",
+        },
+    }
 
 
 def run_seed() -> dict[str, str]:
@@ -66,6 +87,29 @@ def post_json(base: str, path: str, payload: dict) -> dict:
     )
     with urllib.request.urlopen(request, timeout=4) as response:  # noqa: S310 - localhost smoke only
         return json.loads(response.read().decode("utf-8"))
+
+
+def put_json(base: str, path: str, payload: dict) -> dict:
+    request = urllib.request.Request(
+        f"{base}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="PUT",
+    )
+    with urllib.request.urlopen(request, timeout=4) as response:  # noqa: S310 - localhost smoke only
+        return json.loads(response.read().decode("utf-8"))
+
+
+def send_status(base: str, path: str, method: str, payload: dict | None = None) -> int:
+    """Send a request and return only the HTTP status (deterministic, bounded)."""
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"} if payload is not None else {}
+    request = urllib.request.Request(f"{base}{path}", data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=4) as response:  # noqa: S310 - localhost smoke only
+            return int(response.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
 
 
 def wait_ready(base: str) -> dict:
@@ -104,7 +148,9 @@ def main() -> None:
         ready = wait_ready(base)
         if ready.get("status") != "ok" or ready.get("database") != "reachable" or ready.get("scenario_count") != 3:
             raise SystemExit(f"READYZ_BAD {ready}")
-        if ready.get("schema_version") != 4 or ready.get("source_file_count") != 4 or ready.get("source_row_estimate") != 0:
+        if ready.get("endpoint_profile_count") != 1:
+            raise SystemExit(f"READYZ_PROFILE_BAD {ready}")
+        if ready.get("schema_version") != 5 or ready.get("source_file_count") != 4 or ready.get("source_row_estimate") != 0:
             raise SystemExit(f"READYZ_SOURCE_BAD {ready}")
 
         with urllib.request.urlopen(base + "/", timeout=4) as response:  # noqa: S310 - localhost smoke only
@@ -158,6 +204,54 @@ def main() -> None:
             raise SystemExit("EVIDENCE_EXPORT_MISSING_ACTION")
         if evidence.get("boundary") != "synthetic_data_only_no_external_network_calls_no_proprietary_reference_rows":
             raise SystemExit(f"EVIDENCE_BOUNDARY_BAD {evidence.get('boundary')}")
+
+        # --- Endpoint-profile registry lifecycle (SEC-P20) ---
+        backfilled = get_json(base, "/api/endpoint-profiles")["endpoint_profiles"]
+        if len(backfilled) != 1 or backfilled[0]["lifecycle_state"] != "active":
+            raise SystemExit(f"PROFILE_BACKFILL_BAD {backfilled}")
+
+        # Create a draft; evaluation is computed live from persisted fields.
+        approved = post_json(base, "/api/endpoint-profiles", profile_body("A"))
+        profile_id = approved["profile"]["id"]
+        if approved["profile"]["lifecycle_state"] != "draft" or approved["evaluation"]["decision"]["verdict"] != APPROVED:
+            raise SystemExit(f"PROFILE_CREATE_BAD {approved.get('profile')}")
+
+        # Draft update independently changes the verdict (no shared fixture state).
+        updated = put_json(base, f"/api/endpoint-profiles/{profile_id}", profile_body("A", allowlist="stale"))
+        if updated["evaluation"]["decision"]["verdict"] != BLOCKED:
+            raise SystemExit(f"PROFILE_UPDATE_EVAL_BAD {updated['evaluation']['decision']['verdict']}")
+        put_json(base, f"/api/endpoint-profiles/{profile_id}", profile_body("A"))  # restore approved shape
+
+        activated = post_json(base, f"/api/endpoint-profiles/{profile_id}/activation", {})
+        if activated["profile"]["lifecycle_state"] != "active":
+            raise SystemExit(f"PROFILE_ACTIVATE_BAD {activated['profile']}")
+        # An active profile is immutable through the API.
+        if send_status(base, f"/api/endpoint-profiles/{profile_id}", "PUT", profile_body("A")) != 409:
+            raise SystemExit("PROFILE_ACTIVE_MUTABLE")
+
+        # Supersede atomically with a distinct draft replacement.
+        replacement = post_json(base, "/api/endpoint-profiles", profile_body("B", allowlist="stale"))
+        replacement_id = replacement["profile"]["id"]
+        if replacement["evaluation"]["decision"]["verdict"] != BLOCKED:
+            raise SystemExit(f"PROFILE_REPLACEMENT_EVAL_BAD {replacement['evaluation']['decision']['verdict']}")
+        superseded = post_json(base, f"/api/endpoint-profiles/{profile_id}/supersession", {"replacement_id": replacement_id})
+        if superseded["profile"]["profile"]["lifecycle_state"] != "superseded" or superseded["replacement"]["profile"]["lifecycle_state"] != "active":
+            raise SystemExit(f"PROFILE_SUPERSEDE_BAD {superseded}")
+
+        # The old profile is preserved, readable, and links to its replacement.
+        old = get_json(base, f"/api/endpoint-profiles/{profile_id}")
+        if old["profile"]["lifecycle_state"] != "superseded" or old["profile"]["superseded_by"] != replacement_id:
+            raise SystemExit(f"PROFILE_HISTORY_BAD {old['profile']}")
+        # There is no delete route.
+        if send_status(base, f"/api/endpoint-profiles/{profile_id}", "DELETE") not in (404, 405):
+            raise SystemExit("PROFILE_DELETE_ROUTE_PRESENT")
+
+        # The three shipped scenarios still reproduce byte-for-byte after profile writes.
+        for slug, verdict in EXPECTED_VERDICTS.items():
+            after = get_json(base, f"/api/scenarios/{slug}")
+            if after["decision"]["verdict"] != verdict or after["payment_context"]["settlement_endpoint"]["id"] != 1:
+                raise SystemExit(f"SCENARIO_DRIFT_AFTER_PROFILES {slug} {after['decision']['verdict']}")
+        profile_summary = {"created": profile_id, "replacement": replacement_id, "superseded_link": old["profile"]["superseded_by"]}
     finally:
         proc.terminate()
         try:
@@ -173,6 +267,7 @@ def main() -> None:
     print(f"scenarios={','.join(sorted(EXPECTED_SLUGS))}")
     print(f"audit_counts={json.dumps(audit_counts, sort_keys=True)}")
     print(f"source_manifest={json.dumps(source_manifest['lineage_summary'], sort_keys=True)}")
+    print(f"endpoint_profiles={json.dumps(profile_summary, sort_keys=True)}")
 
 
 if __name__ == "__main__":

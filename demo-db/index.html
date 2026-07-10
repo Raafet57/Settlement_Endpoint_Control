@@ -38,6 +38,13 @@
     .actionbar { display:grid; gap:10px; }
     .actionbar button { width:100%; }
     pre { white-space:pre-wrap; color:#d8e6f7; overflow:auto; max-height:360px; margin:0; }
+    input { font:inherit; min-height:44px; border-radius:12px; border:1px solid var(--line); background:rgba(255,255,255,.06); color:var(--ink); padding:0 13px; width:100%; }
+    input, select, button { max-width:100%; }
+    .rowbar { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .rowbar button, .rowbar select { width:auto; min-height:40px; min-width:110px; }
+    .profile { display:grid; gap:6px; }
+    .profile small { word-break:break-word; }
+    #registry { margin-top:18px; }
     @media (max-width:840px) { main, .grid { grid-template-columns:1fr; } .shell { padding:16px; } }
   </style>
 </head>
@@ -85,6 +92,44 @@
         </div>
       </section>
     </main>
+
+    <section class="card" id="registry">
+      <div class="head"><strong>Endpoint profile registry</strong><span id="profileCount" class="pill info">profiles…</span></div>
+      <div class="body stack">
+        <p>Localhost-only synthetic endpoint profiles with a <span class="mono">draft → active → superseded</span> lifecycle. Create a draft, activate it, or supersede an active profile with a draft replacement. Each profile is evaluated independently from its own persisted fields; history is preserved and there is no delete.</p>
+        <div class="stack" id="profileList"></div>
+        <details>
+          <summary>Create or edit a draft profile</summary>
+          <form id="profileForm" class="stack" autocomplete="off">
+            <div class="grid">
+              <label>Institution name <input id="pf_inst_name" type="text" /></label>
+              <label>Institution BIC <input id="pf_inst_bic" type="text" /></label>
+              <label>Jurisdiction <input id="pf_inst_jur" type="text" /></label>
+              <label>Legal entity name <input id="pf_le_name" type="text" /></label>
+              <label>LEI <input id="pf_le_lei" type="text" /></label>
+              <label>Authority status <select id="pf_le_auth"><option>current</option><option>expiring_soon</option><option>expired</option></select></label>
+              <label>Wallet address <input id="pf_ep_wallet" type="text" /></label>
+              <label>Custody <input id="pf_ep_custody" type="text" /></label>
+              <label>Allowlist status <select id="pf_ep_allow"><option>current</option><option>stale</option></select></label>
+              <label>Endpoint owner <input id="pf_ep_owner" type="text" /></label>
+              <label>Payload status <select id="pf_ep_payload"><option>complete</option><option>incomplete</option></select></label>
+              <label>Requested rail <input id="pf_ep_rail" type="text" /></label>
+              <label>UETR <input id="pf_ep_uetr" type="text" /></label>
+              <label>Fallback rail <input id="pf_fb_rail" type="text" /></label>
+              <label>Fallback currency <input id="pf_fb_ccy" type="text" /></label>
+              <label>Fallback account mask <input id="pf_fb_mask" type="text" /></label>
+              <label>Fallback intermediary BIC <input id="pf_fb_bic" type="text" /></label>
+            </div>
+            <div class="actionbar">
+              <button type="submit" id="pf_submit">Create draft profile</button>
+              <button type="button" id="pf_reset">Reset to a new draft</button>
+            </div>
+            <p id="pf_status" class="pill info">Fill the fields and create a synthetic draft.</p>
+          </form>
+        </details>
+        <section class="row"><small>Selected profile</small><pre id="profileDetail">Select a profile to inspect its evaluation.</pre></section>
+      </div>
+    </section>
   </div>
 
   <script>
@@ -123,6 +168,13 @@
         return opt;
       }));
       await loadScenario($('scenarioSelect').value);
+      resetProfileForm();
+      try {
+        await loadProfiles();
+      } catch (err) {
+        $('profileCount').className = 'pill bad';
+        $('profileCount').textContent = 'registry unavailable';
+      }
     }
 
     async function loadScenario(slug) {
@@ -237,11 +289,198 @@
       URL.revokeObjectURL(link.href);
     }
 
+    // --- Endpoint profile registry (safe DOM construction; no innerHTML) ---
+    const PROFILE_FIELDS = {
+      institution: { name: 'pf_inst_name', bic: 'pf_inst_bic', jurisdiction: 'pf_inst_jur' },
+      legal_entity: { name: 'pf_le_name', lei: 'pf_le_lei', authority_status: 'pf_le_auth' },
+      endpoint: { wallet_address: 'pf_ep_wallet', custody: 'pf_ep_custody', allowlist_status: 'pf_ep_allow', endpoint_owner: 'pf_ep_owner', endpoint_payload_status: 'pf_ep_payload', requested_rail: 'pf_ep_rail', uetr: 'pf_ep_uetr' },
+      fallback: { fallback_rail: 'pf_fb_rail', fallback_currency: 'pf_fb_ccy', fallback_account_mask: 'pf_fb_mask', fallback_intermediary_bic: 'pf_fb_bic' },
+    };
+    const lifecyclePill = state => state === 'active' ? 'good' : state === 'superseded' ? 'warn' : 'info';
+    let editingProfileId = null;
+    let profileSeq = Date.now() % 100000;
+
+    async function writeJSON(method, path, payload) {
+      const res = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    function newDraftDefaults() {
+      const tag = String(profileSeq++);
+      return {
+        institution: { name: `Synthetic Institution ${tag}`, bic: `SYNBIC${tag}`, jurisdiction: 'EU synthetic profile' },
+        legal_entity: { name: `Synthetic Entity ${tag}`, lei: `SYNTHLEI${tag}`, authority_status: 'current' },
+        endpoint: {
+          wallet_address: `0xSYN${tag}`, custody: 'Approved custodian', allowlist_status: 'current',
+          endpoint_owner: 'Treasury ops queue', endpoint_payload_status: 'complete', requested_rail: 'Tokenized deposit', uetr: `SYN-UETR-${tag}`,
+          fallback_rail: 'Fiat SSI route', fallback_currency: 'EUR', fallback_account_mask: 'DE•• •••• •••• 4400', fallback_intermediary_bic: 'INTERDEFFXXX',
+        },
+      };
+    }
+
+    function fillProfileForm(source) {
+      for (const [section, fields] of Object.entries(PROFILE_FIELDS)) {
+        // Fallback fields live on the endpoint row in an API response.
+        const bucket = section === 'fallback' ? source.endpoint : source[section];
+        for (const [field, id] of Object.entries(fields)) {
+          const value = bucket && bucket[field] != null ? bucket[field] : '';
+          $(id).value = value;
+        }
+      }
+    }
+
+    function collectProfileForm() {
+      const body = {};
+      for (const [section, fields] of Object.entries(PROFILE_FIELDS)) {
+        body[section] = {};
+        for (const [field, id] of Object.entries(fields)) body[section][field] = $(id).value;
+      }
+      return body;
+    }
+
+    function setProfileStatus(kind, text) {
+      $('pf_status').className = `pill ${kind}`;
+      $('pf_status').textContent = text;
+    }
+
+    function resetProfileForm() {
+      editingProfileId = null;
+      fillProfileForm(newDraftDefaults());
+      $('pf_submit').textContent = 'Create draft profile';
+      setProfileStatus('info', 'Fill the fields and create a synthetic draft.');
+    }
+
+    function showProfileDetail(data) {
+      $('profileDetail').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function viewProfile(id) {
+      showProfileDetail(await json(`/api/endpoint-profiles/${id}`));
+    }
+
+    async function editProfile(id) {
+      const data = await json(`/api/endpoint-profiles/${id}`);
+      editingProfileId = id;
+      fillProfileForm({ institution: data.institution, legal_entity: data.legal_entity, endpoint: data.endpoint });
+      $('pf_submit').textContent = `Save changes to draft #${id}`;
+      setProfileStatus('info', `Editing draft #${id}. Update fields and save.`);
+    }
+
+    // A mutation has COMMITTED on the server. Refresh the registry view and keep
+    // the committed status; if only the post-commit refresh fails, surface a
+    // distinct warning rather than reclassifying a committed write as rejected
+    // (which would break API/UI lifecycle agreement and invite an invalid retry).
+    async function refreshRegistryAfterCommit(committedMessage) {
+      setProfileStatus('good', committedMessage);
+      try {
+        await loadProfiles();
+      } catch (err) {
+        setProfileStatus('warn', `${committedMessage} Registry refresh failed (${err.message}); reload to see the latest.`);
+      }
+    }
+
+    async function activateProfile(id) {
+      try {
+        await writeJSON('POST', `/api/endpoint-profiles/${id}/activation`, {});
+      } catch (err) {
+        setProfileStatus('bad', `Activation rejected: ${err.message}`);
+        return;
+      }
+      await refreshRegistryAfterCommit(`Activated profile #${id}.`);
+    }
+
+    async function supersedeProfile(id, replacementValue) {
+      const replacementId = Number(replacementValue);
+      if (!replacementValue || !Number.isInteger(replacementId)) {
+        setProfileStatus('bad', 'Choose a draft replacement first.');
+        return;
+      }
+      try {
+        await writeJSON('POST', `/api/endpoint-profiles/${id}/supersession`, { replacement_id: replacementId });
+      } catch (err) {
+        setProfileStatus('bad', `Supersession rejected: ${err.message}`);
+        return;
+      }
+      await refreshRegistryAfterCommit(`Superseded #${id} with #${replacementId}.`);
+    }
+
+    function renderProfileRow(p, drafts) {
+      const row = el('article', 'row profile');
+      const head = el('div');
+      head.append(
+        el('strong', 'mono', `#${p.id}`),
+        document.createTextNode(' '),
+        el('span', `pill ${lifecyclePill(p.lifecycle_state)}`, p.lifecycle_state),
+        document.createTextNode(' '),
+        el('span', 'pill info', p.verdict),
+      );
+      row.append(head, el('small', null, `BIC ${p.bic} · LEI ${p.lei} · UETR ${p.uetr}`));
+      if (p.lifecycle_state === 'superseded' && p.superseded_by != null) {
+        row.append(el('small', null, `Replaced by profile #${p.superseded_by}`));
+      }
+      const bar = el('div', 'rowbar');
+      const view = el('button', null, 'View'); view.type = 'button';
+      view.addEventListener('click', () => viewProfile(p.id));
+      bar.append(view);
+      if (p.lifecycle_state === 'draft') {
+        const edit = el('button', null, 'Edit'); edit.type = 'button';
+        edit.addEventListener('click', () => editProfile(p.id));
+        const activate = el('button', null, 'Activate'); activate.type = 'button';
+        activate.addEventListener('click', () => activateProfile(p.id));
+        bar.append(edit, activate);
+      } else if (p.lifecycle_state === 'active') {
+        const select = el('select');
+        const placeholder = el('option', null, drafts.length ? 'Choose draft replacement…' : 'No draft available');
+        placeholder.value = '';
+        select.append(placeholder);
+        drafts.forEach(d => { const opt = el('option', null, `#${d.id} · ${d.verdict}`); opt.value = String(d.id); select.append(opt); });
+        const supersede = el('button', null, 'Supersede'); supersede.type = 'button';
+        supersede.addEventListener('click', () => supersedeProfile(p.id, select.value));
+        bar.append(select, supersede);
+      }
+      row.append(bar);
+      return row;
+    }
+
+    async function loadProfiles() {
+      const data = await json('/api/endpoint-profiles');
+      const profiles = data.endpoint_profiles;
+      $('profileCount').className = 'pill info';
+      $('profileCount').textContent = `${profiles.length} profile${profiles.length === 1 ? '' : 's'}`;
+      const drafts = profiles.filter(p => p.lifecycle_state === 'draft');
+      $('profileList').replaceChildren(...profiles.map(p => renderProfileRow(p, drafts)));
+    }
+
+    async function submitProfileForm(event) {
+      event.preventDefault();
+      let result;
+      try {
+        const body = collectProfileForm();
+        result = editingProfileId == null
+          ? await writeJSON('POST', '/api/endpoint-profiles', body)
+          : await writeJSON('PUT', `/api/endpoint-profiles/${editingProfileId}`, body);
+      } catch (err) {
+        setProfileStatus('bad', `Rejected: ${err.message}`);
+        return;
+      }
+      // The write committed. Reset the form for the next draft FIRST, then set the
+      // committed status so a normal save success is not erased by the reset; a
+      // post-commit refresh failure downgrades to a warning, never a rejection.
+      const committedMessage = `Saved profile #${result.profile.id} (${result.profile.lifecycle_state}) · ${result.evaluation.decision.verdict}`;
+      resetProfileForm();
+      showProfileDetail(result);
+      await refreshRegistryAfterCommit(committedMessage);
+    }
+
     $('scenarioSelect').addEventListener('change', e => loadScenario(e.target.value));
     $('reload').addEventListener('click', () => loadScenario($('scenarioSelect').value));
     $('openRepair').addEventListener('click', () => recordAction('open_repair_task'));
     $('approveFallback').addEventListener('click', () => recordAction('approve_fallback'));
     $('downloadEvidence').addEventListener('click', downloadEvidence);
+    $('profileForm').addEventListener('submit', submitProfileForm);
+    $('pf_reset').addEventListener('click', resetProfileForm);
     init().catch(err => { $('health').className = 'pill bad'; $('health').textContent = err.message; });
   </script>
 </body>

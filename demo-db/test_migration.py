@@ -60,7 +60,8 @@ AUDIT_ROWS = [
 ]
 
 # The ledger a database at CURRENT_SCHEMA_VERSION must carry (timestamp free-form).
-GOOD_LEDGER = [(migrate.CURRENT_SCHEMA_VERSION, migrate.FOUNDATION_MIGRATION_NAME, SYN_TIME)]
+# Derived from the registry so it tracks every foundation step automatically.
+GOOD_LEDGER = [(version, name, SYN_TIME) for (version, name) in migrate.current_ledger()]
 
 # Every business table a v3->v4 foundation upgrade must leave byte-for-byte intact.
 BUSINESS_TABLES = [
@@ -69,11 +70,16 @@ BUSINESS_TABLES = [
     "operator_actions", "source_manifest",
 ]
 
-# Minimal standalone shapes mirroring seed.py's columns for the two tables whose
-# preservation the invariants name. No FK REFERENCES: the fixture is a disposable
-# stand-in for persistent local state, not a full seeded graph.
+# Minimal standalone shapes mirroring seed.py's columns for the tables whose
+# preservation the invariants name, plus a minimal settlement_endpoints (a v3
+# baseline business table the 4->5 profile-registry backfill reads). No extra FK
+# REFERENCES: the fixture is a disposable stand-in for persistent local state,
+# not a full seeded graph. Two synthetic endpoints prove the backfill creates one
+# active profile per endpoint.
 _FIXTURE_DDL = """
 CREATE TABLE seed_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE settlement_endpoints (id INTEGER PRIMARY KEY);
+INSERT INTO settlement_endpoints(id) VALUES (1), (2);
 CREATE TABLE operator_actions (
     id INTEGER PRIMARY KEY,
     scenario_id INTEGER NOT NULL,
@@ -259,7 +265,8 @@ class MigrateRunnerTests(TempDbTestCase):
         self.assertEqual(result["status"], "migrated")
         self.assertEqual(result["from"], 3)
         self.assertEqual(result["to"], migrate.CURRENT_SCHEMA_VERSION)
-        self.assertEqual(result["applied"], [migrate.FOUNDATION_MIGRATION_NAME])
+        # The full forward path applies every registered step in order.
+        self.assertEqual(result["applied"], [name for (_v, name) in migrate.current_ledger()])
 
         # Version markers advanced and now consistent.
         uv, sm = read_markers(path)
@@ -269,6 +276,14 @@ class MigrateRunnerTests(TempDbTestCase):
         # Ledger metadata recorded.
         ledger = read_rows(path, "schema_migrations", order_by="version")
         self.assertEqual([(v, n) for (v, n, _at) in ledger], migrate.current_ledger())
+
+        # The 4->5 step backfilled one active profile per settlement endpoint,
+        # under the server-owned tenant, with no supersession link.
+        profiles = read_rows(path, "endpoint_profiles", order_by="id")
+        self.assertEqual([(p[1], p[2], p[3], p[4]) for p in profiles], [
+            (migrate.SYNTHETIC_TENANT_ID, 1, "active", None),
+            (migrate.SYNTHETIC_TENANT_ID, 2, "active", None),
+        ])
 
         # Non-baseline synthetic data preserved exactly (content AND counts).
         self.assertEqual(read_rows(path, "operator_actions"), OPERATOR_ROWS)
@@ -473,6 +488,13 @@ class CurrentLedgerValidationTests(TempDbTestCase):
             seed_meta={"schema_version": str(migrate.CURRENT_SCHEMA_VERSION)},
             ledger_rows=GOOD_LEDGER,
         )
+        # A DB claiming CURRENT must also carry a well-formed, fully-covered
+        # endpoint_profiles registry for already_current to hold.
+        con = sqlite3.connect(path)
+        con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+        migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, SYN_TIME)
+        con.commit()
+        con.close()
         result = migrate.migrate(path)
         self.assertEqual(result["status"], "already_current")
         self.assertEqual(result["applied"], [])
@@ -581,6 +603,682 @@ class FullSchemaUpgradeTests(TempDbTestCase):
         )
         ledger = read_rows(path, "schema_migrations", order_by="version")
         self.assertEqual([(v, n) for (v, n, _at) in ledger], migrate.current_ledger())
+
+
+class EndpointProfilesV5MigrationTests(TempDbTestCase):
+    """SEC-P20: the real 4 -> 5 profile-registry migration.
+
+    Exercises table creation, per-endpoint active-profile backfill, idempotence,
+    atomic rollback, foreign-key/integrity checks, and byte-for-byte preservation
+    of every existing business row -- against the FULL seeded business schema.
+    """
+
+    def _seed_full(self, path: Path) -> None:
+        with mock.patch.object(seed, "DB_PATH", path):
+            seed.seed()
+
+    def _downgrade(self, path: Path, to_version: int) -> None:
+        """Turn a fresh v5 seed into a genuine earlier state (no endpoint_profiles)."""
+        con = sqlite3.connect(path)
+        try:
+            con.execute("DROP TABLE endpoint_profiles")
+            if to_version == 4:
+                con.execute("DELETE FROM schema_migrations WHERE version = ?", (migrate.CURRENT_SCHEMA_VERSION,))
+                con.execute("UPDATE seed_meta SET value='4' WHERE key='schema_version'")
+                con.execute("PRAGMA user_version = 4")
+            else:  # a true legacy v3: no ledger, user_version unset
+                con.execute("DROP TABLE schema_migrations")
+                con.execute("UPDATE seed_meta SET value='3' WHERE key='schema_version'")
+                con.execute("PRAGMA user_version = 0")
+            con.commit()
+        finally:
+            con.close()
+
+    def _assert_backfill_and_integrity(self, path: Path) -> None:
+        profiles = read_rows(path, "endpoint_profiles", order_by="id")
+        self.assertEqual(len(profiles), 1, "one active profile per settlement endpoint")
+        self.assertEqual(
+            (profiles[0][1], profiles[0][2], profiles[0][3], profiles[0][4]),
+            (migrate.SYNTHETIC_TENANT_ID, 1, "active", None),
+        )
+        con = sqlite3.connect(path)
+        self.addCleanup(con.close)
+        con.execute("PRAGMA foreign_keys = ON")
+        self.assertEqual(con.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.assertEqual(con.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_v4_to_v5_creates_table_and_backfills(self) -> None:
+        path = self.db("v4.sqlite")
+        self._seed_full(path)
+        self._downgrade(path, 4)
+        self.assertFalse(table_exists(path, "endpoint_profiles"))
+        before = business_snapshot(path)
+
+        result = migrate.migrate(path)
+        self.assertEqual(result["status"], "migrated")
+        self.assertEqual(result["from"], 4)
+        self.assertEqual(result["to"], migrate.CURRENT_SCHEMA_VERSION)
+        self.assertEqual(result["applied"], [migrate.PROFILES_MIGRATION_NAME])
+
+        self.assertTrue(table_exists(path, "endpoint_profiles"))
+        self._assert_backfill_and_integrity(path)
+        # Every business table is byte-for-byte identical (additive migration).
+        self.assertEqual(business_snapshot(path), before)
+        self.assertEqual(read_markers(path), (migrate.CURRENT_SCHEMA_VERSION, str(migrate.CURRENT_SCHEMA_VERSION)))
+
+    def test_v4_to_v5_is_idempotent(self) -> None:
+        path = self.db("v4b.sqlite")
+        self._seed_full(path)
+        self._downgrade(path, 4)
+        first = migrate.migrate(path)
+        second = migrate.migrate(path)
+        self.assertEqual(first["status"], "migrated")
+        self.assertEqual(second["status"], "already_current")
+        self.assertEqual(second["applied"], [])
+        # No duplicate backfill on a second pass.
+        self.assertEqual(len(read_rows(path, "endpoint_profiles")), 1)
+
+    def test_v4_to_v5_rolls_back_on_induced_failure(self) -> None:
+        path = self.db("v4c.sqlite")
+        self._seed_full(path)
+        self._downgrade(path, 4)
+
+        def boom(con: sqlite3.Connection) -> None:
+            # Create the table and a partial backfill, then fail: the runner must
+            # revert the table, the row, and both version markers atomically.
+            con.execute(migrate.ENDPOINT_PROFILES_DDL)
+            con.execute(
+                "INSERT INTO endpoint_profiles(tenant_id, endpoint_id, lifecycle_state, superseded_by, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (migrate.SYNTHETIC_TENANT_ID, 1, "active", None, SYN_TIME, SYN_TIME),
+            )
+            raise RuntimeError("induced 4->5 failure")
+
+        failing = [(4, migrate.CURRENT_SCHEMA_VERSION, "boom_profiles", boom)]
+        with mock.patch.object(migrate, "MIGRATIONS", failing):
+            with self.assertRaises(migrate.MigrationError) as cm:
+                migrate.migrate(path)
+        self.assertEqual(cm.exception.code, "migration_failed")
+        self.assertFalse(table_exists(path, "endpoint_profiles"), "table creation must roll back")
+        self.assertEqual(read_markers(path), (4, "4"), "version markers must stay at v4")
+
+    def test_full_path_v3_to_v5_backfills_and_preserves(self) -> None:
+        path = self.db("v3full.sqlite")
+        self._seed_full(path)
+        # A non-baseline synthetic operator action a fresh seed never writes, so it
+        # can only be preserved persistent local state.
+        con = sqlite3.connect(path)
+        con.execute(
+            "INSERT INTO operator_actions(scenario_id, action_type, actor, status, detail, created_at)"
+            " VALUES (1,'hold_payment','ops_analyst','recorded','SYN-P20-preserve','2026-06-05T09:00:00Z')"
+        )
+        con.commit()
+        con.close()
+        self._downgrade(path, 3)
+        before = business_snapshot(path)
+
+        result = migrate.migrate(path)
+        self.assertEqual(result["status"], "migrated")
+        self.assertEqual(result["from"], 3)
+        self.assertEqual(result["to"], migrate.CURRENT_SCHEMA_VERSION)
+        self.assertEqual(result["applied"], [name for (_v, name) in migrate.current_ledger()])
+
+        self._assert_backfill_and_integrity(path)
+        self.assertEqual(business_snapshot(path), before)
+        self.assertEqual(len(read_rows(path, "operator_actions")), 1)
+
+    def test_current_schema_validated_inside_v5_migration_transaction(self) -> None:
+        # A v5-reaching step that creates the table but leaves an endpoint
+        # uncovered must be caught INSIDE the migration transaction and rolled
+        # back (table gone, markers stay v4), not committed as a broken v5.
+        path = self.db("v4txn.sqlite")
+        self._seed_full(path)
+        self._downgrade(path, 4)
+
+        def create_only(con: sqlite3.Connection) -> None:
+            con.execute(migrate.ENDPOINT_PROFILES_DDL)  # create table, skip the backfill
+
+        step = [(4, migrate.CURRENT_SCHEMA_VERSION, migrate.PROFILES_MIGRATION_NAME, create_only)]
+        with mock.patch.object(migrate, "MIGRATIONS", step):
+            with self.assertRaises(migrate.MigrationError) as cm:
+                migrate.migrate(path)
+        self.assertEqual(cm.exception.code, "inconsistent_version")
+        self.assertFalse(table_exists(path, "endpoint_profiles"), "the broken v5 step must roll back")
+        self.assertEqual(read_markers(path), (4, "4"))
+
+
+# Alternate endpoint_profiles table shapes used to inject exactly one current-
+# schema defect while markers and the ledger stay valid.
+_FK_ONLY_PROFILES_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL,
+    superseded_by INTEGER REFERENCES endpoint_profiles(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+_MISSING_COLUMN_PROFILES_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+_NO_FK_PROFILES_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL,
+    lifecycle_state TEXT NOT NULL,
+    superseded_by INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+# Claimed-v5 tables that carry valid-looking rows but each DROP exactly one
+# declared rail, so a future write could violate an invariant the current data
+# happens to satisfy. Each keeps every OTHER named rail intact so the validator
+# must fail on the single missing one.
+_NO_UNIQUE_ENDPOINT_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('draft','active','superseded')),
+    superseded_by INTEGER REFERENCES endpoint_profiles(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+_NO_LIFECYCLE_CHECK_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL UNIQUE REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL,
+    superseded_by INTEGER REFERENCES endpoint_profiles(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+_NO_SELF_FK_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL UNIQUE REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('draft','active','superseded')),
+    superseded_by INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+_NULLABLE_COLUMN_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL UNIQUE REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('draft','active','superseded')),
+    superseded_by INTEGER REFERENCES endpoint_profiles(id),
+    created_at TEXT,
+    updated_at TEXT NOT NULL
+);
+"""
+_NO_PK_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER NOT NULL,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL UNIQUE REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('draft','active','superseded')),
+    superseded_by INTEGER REFERENCES endpoint_profiles(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+# Composite PRIMARY KEY(id, tenant_id): id still has PK ordinal 1 (so a pk-flag
+# check passes) but the declared identity is not the exact single-column id PK.
+_COMPOSITE_PK_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL UNIQUE REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('draft','active','superseded')),
+    superseded_by INTEGER UNIQUE REFERENCES endpoint_profiles(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (id, tenant_id),
+    CHECK (
+        (lifecycle_state IN ('draft','active') AND superseded_by IS NULL)
+        OR (lifecycle_state = 'superseded' AND superseded_by IS NOT NULL AND superseded_by <> id)
+    )
+);
+"""
+# Lifecycle enum CHECK kept, but the lifecycle/superseded_by relationship CHECK
+# is dropped entirely.
+_NO_RELATIONSHIP_CHECK_DDL = """
+CREATE TABLE endpoint_profiles (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL UNIQUE REFERENCES settlement_endpoints(id),
+    lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('draft','active','superseded')),
+    superseded_by INTEGER UNIQUE REFERENCES endpoint_profiles(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+
+class CurrentSchemaValidationTests(TempDbTestCase):
+    """Valid v5 markers + ledger are not enough: migrate() must also verify the
+    endpoint_profiles registry exists, has the required shape and foreign key,
+    covers every settlement endpoint exactly once, and has valid lifecycle and
+    superseded_by relationships -- failing closed and preserving state otherwise.
+    """
+
+    def _v5(self, name, setup=None):
+        path = self.db(name)
+        build_db(
+            path,
+            user_version=migrate.CURRENT_SCHEMA_VERSION,
+            seed_meta={"schema_version": str(migrate.CURRENT_SCHEMA_VERSION)},
+            ledger_rows=GOOD_LEDGER,
+        )
+        if setup is not None:
+            con = sqlite3.connect(path)  # foreign_keys OFF by default -> inject freely
+            try:
+                setup(con)
+                con.commit()
+            finally:
+                con.close()
+        return path
+
+    @staticmethod
+    def _insert(con, rows):
+        con.executemany(
+            "INSERT INTO endpoint_profiles(id, tenant_id, endpoint_id, lifecycle_state, superseded_by, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            rows,
+        )
+
+    def _assert_fails_closed(self, path):
+        with self.assertRaises(migrate.MigrationError) as cm:
+            migrate.migrate(path)
+        self.assertEqual(cm.exception.code, "inconsistent_version")
+        # State preserved: markers stay at the (claimed) current version.
+        self.assertEqual(read_markers(path), (migrate.CURRENT_SCHEMA_VERSION, str(migrate.CURRENT_SCHEMA_VERSION)))
+
+    def test_valid_v5_reports_already_current(self):
+        def setup(con):
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, SYN_TIME)
+        path = self._v5("valid.sqlite", setup)
+        self.assertEqual(migrate.migrate(path)["status"], "already_current")
+
+    def test_missing_current_table_fails_closed(self):
+        self._assert_fails_closed(self._v5("missing.sqlite", setup=None))
+
+    def test_malformed_current_table_fails_closed(self):
+        def setup(con):
+            con.executescript(_MISSING_COLUMN_PROFILES_DDL)  # no superseded_by column
+        self._assert_fails_closed(self._v5("malformed.sqlite", setup))
+
+    def test_missing_foreign_key_fails_closed(self):
+        def setup(con):
+            con.executescript(_NO_FK_PROFILES_DDL)
+            self._insert(con, [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "active", None, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+            ])
+        self._assert_fails_closed(self._v5("nofk.sqlite", setup))
+
+    def test_uncovered_endpoint_fails_closed(self):
+        def setup(con):
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            self._insert(con, [(1, migrate.SYNTHETIC_TENANT_ID, 1, "active", None, SYN_TIME, SYN_TIME)])  # endpoint 2 orphaned
+        self._assert_fails_closed(self._v5("uncovered.sqlite", setup))
+
+    def test_duplicate_coverage_fails_closed(self):
+        def setup(con):
+            con.executescript(_FK_ONLY_PROFILES_DDL)  # no UNIQUE(endpoint_id)
+            self._insert(con, [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "active", None, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+                (3, migrate.SYNTHETIC_TENANT_ID, 1, "draft", None, SYN_TIME, SYN_TIME),  # endpoint 1 twice
+            ])
+        self._assert_fails_closed(self._v5("dupe.sqlite", setup))
+
+    def test_invalid_lifecycle_link_fails_closed(self):
+        for label, rows in {
+            "draft_with_link": [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "draft", 2, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+            ],
+            "superseded_without_link": [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "superseded", None, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+            ],
+            "superseded_self_link": [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "superseded", 1, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+            ],
+            "unknown_lifecycle": [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "archived", None, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+            ],
+            "null_lifecycle": [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, None, None, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+            ],
+        }.items():
+            with self.subTest(case=label):
+                def setup(con, rows=rows):
+                    ddl = _FK_ONLY_PROFILES_DDL
+                    if label == "null_lifecycle":
+                        ddl = ddl.replace("lifecycle_state TEXT NOT NULL", "lifecycle_state TEXT")
+                    con.executescript(ddl)  # no CHECK -> inject the bad row
+                    self._insert(con, rows)
+                self._assert_fails_closed(self._v5(f"link_{label}.sqlite", setup))
+
+    def test_missing_settlement_endpoints_table_fails_closed_stably(self):
+        # A well-formed endpoint_profiles registry but an absent (unreadable)
+        # settlement_endpoints table must convert the raw sqlite3.OperationalError
+        # into a stable inconsistent_version MigrationError, not a traceback.
+        def setup(con):
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            self._insert(con, [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "active", None, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+            ])
+            con.execute("DROP TABLE settlement_endpoints")
+        self._assert_fails_closed(self._v5("no_endpoints.sqlite", setup))
+
+    def test_cli_missing_settlement_endpoints_is_clean_fail_closed(self):
+        def setup(con):
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            con.execute("DROP TABLE settlement_endpoints")
+        path = self._v5("cli_no_endpoints.sqlite", setup)
+        proc = subprocess.run(
+            [sys.executable, str(MIGRATE), "--db", str(path)], text=True, capture_output=True
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr, "the CLI must fail closed without a traceback")
+        self.assertIn("inconsistent_version", proc.stderr)
+
+    def test_wrong_tenant_profiles_fail_closed(self):
+        # Every row is well-formed and covers an endpoint exactly once, but under a
+        # tenant other than the server-owned one -- so the app would see no
+        # profiles. The validator must reject this as inconsistent, not serve it.
+        def setup(con):
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            self._insert(con, [
+                (1, "attacker-tenant", 1, "active", None, SYN_TIME, SYN_TIME),
+                (2, "attacker-tenant", 2, "active", None, SYN_TIME, SYN_TIME),
+            ])
+        self._assert_fails_closed(self._v5("wrong_tenant.sqlite", setup))
+
+    # -- SEC-P20 blocker 2: current-state supersession-history invariants that no
+    # per-row CHECK can see (the CHECK cannot inspect the target's state, and
+    # cannot span rows) yet must hold for a well-formed v5 registry.
+
+    def test_superseded_by_draft_target_fails_closed(self):
+        # A superseded profile whose replacement is still a draft is impossible
+        # through the state machine (supersession activates the replacement
+        # atomically), but the per-row CHECK cannot see the target's lifecycle.
+        def setup(con):
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            self._insert(con, [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "superseded", 2, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "draft", None, SYN_TIME, SYN_TIME),  # a draft target
+            ])
+        self._assert_fails_closed(self._v5("draft_target.sqlite", setup))
+
+    def test_supersession_cycle_fails_closed(self):
+        # A multi-profile supersession cycle (1 -> 2 -> 1) satisfies every per-row
+        # rule (each link is non-null and non-self) but is a corrupt history with
+        # no active head.
+        def setup(con):
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            self._insert(con, [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "superseded", 2, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "superseded", 1, SYN_TIME, SYN_TIME),
+            ])
+        self._assert_fails_closed(self._v5("cycle.sqlite", setup))
+
+    def test_supersession_branching_fails_closed(self):
+        # Two profiles superseded by the SAME replacement (reuse/branching) breaks
+        # one-to-one replacement history. The bad rows are injected through a table
+        # without the strengthened UNIQUE(superseded_by), mirroring a legacy table.
+        def setup(con):
+            con.execute("INSERT INTO settlement_endpoints(id) VALUES (3)")
+            con.executescript(_FK_ONLY_PROFILES_DDL)  # no UNIQUE(superseded_by)
+            self._insert(con, [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "superseded", 3, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "superseded", 3, SYN_TIME, SYN_TIME),  # reuses #3
+                (3, migrate.SYNTHETIC_TENANT_ID, 3, "active", None, SYN_TIME, SYN_TIME),
+            ])
+        self._assert_fails_closed(self._v5("branching.sqlite", setup))
+
+    def test_valid_multi_hop_history_reports_already_current(self):
+        # 1 -> 2 -> 3 is a legal history: 1 and 2 superseded, 3 active. The
+        # strengthened validator must PRESERVE it, not over-reject valid lineage.
+        def setup(con):
+            con.execute("INSERT INTO settlement_endpoints(id) VALUES (3)")
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            self._insert(con, [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "superseded", 2, SYN_TIME, SYN_TIME),
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "superseded", 3, SYN_TIME, SYN_TIME),
+                (3, migrate.SYNTHETIC_TENANT_ID, 3, "active", None, SYN_TIME, SYN_TIME),
+            ])
+        path = self._v5("multi_hop.sqlite", setup)
+        self.assertEqual(migrate.migrate(path)["status"], "already_current")
+
+    # -- SEC-P20 blocker 2: named DECLARED constraint rails. Current rows may pass
+    # every data check while the table has silently dropped a declared rail, so a
+    # later write could violate it. Each fixture carries valid bijective rows and
+    # drops exactly one rail.
+
+    def _two_active(self, con):
+        self._insert(con, [
+            (1, migrate.SYNTHETIC_TENANT_ID, 1, "active", None, SYN_TIME, SYN_TIME),
+            (2, migrate.SYNTHETIC_TENANT_ID, 2, "active", None, SYN_TIME, SYN_TIME),
+        ])
+
+    def test_missing_unique_endpoint_id_rail_fails_closed(self):
+        def setup(con):
+            con.executescript(_NO_UNIQUE_ENDPOINT_DDL)  # endpoint_id FK but no UNIQUE
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("no_unique_endpoint.sqlite", setup))
+
+    def test_missing_lifecycle_check_rail_fails_closed(self):
+        def setup(con):
+            con.executescript(_NO_LIFECYCLE_CHECK_DDL)  # lifecycle_state has no CHECK
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("no_lifecycle_check.sqlite", setup))
+
+    def test_missing_self_referential_fk_rail_fails_closed(self):
+        def setup(con):
+            con.executescript(_NO_SELF_FK_DDL)  # superseded_by has no self-FK
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("no_self_fk.sqlite", setup))
+
+    def test_missing_not_null_rail_fails_closed(self):
+        def setup(con):
+            con.executescript(_NULLABLE_COLUMN_DDL)  # created_at dropped NOT NULL
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("nullable_created_at.sqlite", setup))
+
+    def test_missing_primary_key_rail_fails_closed(self):
+        def setup(con):
+            con.executescript(_NO_PK_DDL)  # id is not the primary key
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("no_pk.sqlite", setup))
+
+    def test_missing_unique_superseded_by_rail_fails_closed(self):
+        # Otherwise-exact current v5 that drops ONLY the UNIQUE(superseded_by) rail.
+        # Valid non-branching rows pass every data check, but a future write could
+        # branch replacement history -- so already_current must not be reported.
+        def setup(con):
+            ddl = migrate.ENDPOINT_PROFILES_DDL.replace(
+                "superseded_by INTEGER UNIQUE REFERENCES", "superseded_by INTEGER REFERENCES"
+            )
+            con.executescript(ddl)
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("no_unique_superseded.sqlite", setup))
+
+    def test_endpoint_fk_wrong_target_column_fails_closed(self):
+        # endpoint_id foreign key points at the wrong target COLUMN
+        # (settlement_endpoints.alt, not id). Matching only the source table+column
+        # accepts it; the exact FK tuple endpoint_id -> settlement_endpoints(id)
+        # must be required.
+        def setup(con):
+            con.execute("DROP TABLE settlement_endpoints")
+            con.execute("CREATE TABLE settlement_endpoints (id INTEGER PRIMARY KEY, alt INTEGER UNIQUE)")
+            con.execute("INSERT INTO settlement_endpoints(id, alt) VALUES (1, 101), (2, 102)")
+            ddl = migrate.ENDPOINT_PROFILES_DDL.replace(
+                "endpoint_id INTEGER NOT NULL UNIQUE REFERENCES settlement_endpoints(id)",
+                "endpoint_id INTEGER NOT NULL UNIQUE REFERENCES settlement_endpoints(alt)",
+            )
+            con.executescript(ddl)
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("endpoint_fk_wrong_col.sqlite", setup))
+
+    def test_self_fk_wrong_target_column_fails_closed(self):
+        # superseded_by self-foreign-key points at the wrong target COLUMN
+        # (endpoint_profiles.endpoint_id, not id); the exact tuple
+        # superseded_by -> endpoint_profiles(id) must be required.
+        def setup(con):
+            ddl = migrate.ENDPOINT_PROFILES_DDL.replace(
+                "superseded_by INTEGER UNIQUE REFERENCES endpoint_profiles(id)",
+                "superseded_by INTEGER UNIQUE REFERENCES endpoint_profiles(endpoint_id)",
+            )
+            con.executescript(ddl)
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("self_fk_wrong_col.sqlite", setup))
+
+    def test_composite_primary_key_fails_closed(self):
+        # PK(id, tenant_id): id still has PK ordinal 1 (pk-flag check passes) but the
+        # declared identity is not the exact single-column id primary key.
+        def setup(con):
+            con.executescript(_COMPOSITE_PK_DDL)
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("composite_pk.sqlite", setup))
+
+    def test_destructive_fk_action_fails_closed(self):
+        # endpoint_id FK altered to ON DELETE CASCADE: table/from/to still match, but
+        # it is no longer the declared default-action rail.
+        def setup(con):
+            ddl = migrate.ENDPOINT_PROFILES_DDL.replace(
+                "REFERENCES settlement_endpoints(id)",
+                "REFERENCES settlement_endpoints(id) ON DELETE CASCADE",
+            )
+            con.executescript(ddl)
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("fk_cascade.sqlite", setup))
+
+    def test_relationship_check_removed_fails_closed(self):
+        # The lifecycle/superseded_by relationship CHECK is gone while the lifecycle
+        # enum CHECK remains; valid rows pass, but a future write could break the
+        # superseded_by relationship.
+        def setup(con):
+            con.executescript(_NO_RELATIONSHIP_CHECK_DDL)
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("no_rel_check.sqlite", setup))
+
+    def test_relationship_check_weakened_fails_closed(self):
+        # The relationship CHECK is kept but self-link protection (superseded_by <> id)
+        # is removed; current rows are valid yet a self-superseding write becomes possible.
+        def setup(con):
+            ddl = migrate.ENDPOINT_PROFILES_DDL.replace(" AND superseded_by <> id", "")
+            con.executescript(ddl)
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("weak_rel_check.sqlite", setup))
+
+    def test_recased_lifecycle_literal_fails_closed(self):
+        # Only the quoted lifecycle CHECK literal is re-cased ('draft' -> 'DRAFT').
+        # Active rows still insert, but a normal lowercase 'draft' write would now
+        # fail the CHECK. A fingerprint that lower-cases quoted string literals would
+        # wrongly accept this altered table; the exact declared literal case must be
+        # preserved so this fails closed.
+        def setup(con):
+            ddl = migrate.ENDPOINT_PROFILES_DDL.replace("'draft'", "'DRAFT'")
+            con.executescript(ddl)
+            self._two_active(con)
+        self._assert_fails_closed(self._v5("recased_lifecycle_literal.sqlite", setup))
+
+
+class EndpointProfilesDdlConstraintTests(unittest.TestCase):
+    """The strengthened DDL rejects bad rows at write time: UNIQUE endpoint_id,
+    and a lifecycle/superseded_by CHECK."""
+
+    def _fresh(self):
+        con = sqlite3.connect(":memory:")
+        con.executescript("CREATE TABLE settlement_endpoints(id INTEGER PRIMARY KEY);")
+        con.executemany("INSERT INTO settlement_endpoints(id) VALUES (?)", [(1,), (2,)])
+        con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+        return con
+
+    def _insert(self, con, *, pid, endpoint_id, state, superseded_by=None):
+        con.execute(
+            "INSERT INTO endpoint_profiles(id, tenant_id, endpoint_id, lifecycle_state, superseded_by, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (pid, "synthetic-demo", endpoint_id, state, superseded_by, "t", "t"),
+        )
+
+    def test_unique_endpoint_id_enforced(self):
+        con = self._fresh()
+        self.addCleanup(con.close)
+        self._insert(con, pid=1, endpoint_id=1, state="active")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(con, pid=2, endpoint_id=1, state="draft")  # duplicate endpoint_id
+
+    def test_draft_or_active_cannot_carry_superseded_by(self):
+        con = self._fresh()
+        self.addCleanup(con.close)
+        for state in ("draft", "active"):
+            with self.subTest(state=state):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self._insert(con, pid=10, endpoint_id=1, state=state, superseded_by=2)
+
+    def test_superseded_requires_non_self_link(self):
+        con = self._fresh()
+        self.addCleanup(con.close)
+        with self.assertRaises(sqlite3.IntegrityError):  # superseded needs a link
+            self._insert(con, pid=1, endpoint_id=1, state="superseded", superseded_by=None)
+        with self.assertRaises(sqlite3.IntegrityError):  # link must not be self
+            self._insert(con, pid=2, endpoint_id=1, state="superseded", superseded_by=2)
+
+    def test_valid_lifecycle_rows_accepted(self):
+        con = self._fresh()
+        self.addCleanup(con.close)
+        self._insert(con, pid=1, endpoint_id=1, state="active")
+        self._insert(con, pid=2, endpoint_id=2, state="superseded", superseded_by=1)  # valid non-self link
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM endpoint_profiles").fetchone()[0], 2)
+
+    def test_superseded_by_is_unique_one_to_one_replacement(self):
+        # One-to-one replacement history: a replacement supersedes at most one
+        # profile, so two superseded profiles cannot share a superseded_by target.
+        con = self._fresh()
+        self.addCleanup(con.close)
+        con.execute("INSERT INTO settlement_endpoints(id) VALUES (3)")
+        self._insert(con, pid=3, endpoint_id=3, state="active")  # the replacement head
+        self._insert(con, pid=1, endpoint_id=1, state="superseded", superseded_by=3)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(con, pid=2, endpoint_id=2, state="superseded", superseded_by=3)  # reuses #3
+
+    def test_distinct_superseded_by_targets_accepted(self):
+        # Distinct replacement targets (a valid multi-hop history) are still allowed.
+        con = self._fresh()
+        self.addCleanup(con.close)
+        con.execute("INSERT INTO settlement_endpoints(id) VALUES (3)")
+        self._insert(con, pid=1, endpoint_id=1, state="superseded", superseded_by=2)
+        self._insert(con, pid=2, endpoint_id=2, state="superseded", superseded_by=3)
+        self._insert(con, pid=3, endpoint_id=3, state="active")
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM endpoint_profiles").fetchone()[0], 3)
 
 
 if __name__ == "__main__":

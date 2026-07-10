@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from evaluator import evaluate
+
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "data" / "demo.sqlite"
 INDEX = ROOT / "index.html"
@@ -24,6 +26,66 @@ MANIFEST_PATH = ROOT / "source_manifest.json"
 MAX_ACTION_BODY_BYTES = 1024
 ALLOWED_ACTION_TYPES = frozenset({"open_repair_task", "approve_fallback", "hold_payment"})
 ALLOWED_ACTORS = frozenset({"demo_operator", "ops_analyst"})
+
+# --- Endpoint-profile registry policy (SEC-P20) ----------------------------
+# The single server-owned synthetic tenant. It is never client-supplied; every
+# profile read/write/transition query is scoped through it. Must equal
+# migrate.SYNTHETIC_TENANT_ID (a focused test pins that equality).
+TENANT_ID = "synthetic-demo"
+
+LIFECYCLE_DRAFT = "draft"
+LIFECYCLE_ACTIVE = "active"
+LIFECYCLE_SUPERSEDED = "superseded"
+
+# The nested profile body carries four sections, so the size bound is larger than
+# the action body -- but still bounded and rejected by declared length first.
+MAX_PROFILE_BODY_BYTES = 4096
+MAX_FIELD_LEN = 200
+
+# Supported enum values, exactly the sets the evaluator understands. Any other
+# value is unsupported and fails closed (no coercion).
+AUTHORITY_STATES = frozenset({"current", "expiring_soon", "expired"})
+ALLOWLIST_STATES = frozenset({"current", "stale"})
+PAYLOAD_STATES = frozenset({"complete", "incomplete"})
+
+# Ordered section schema: (section, required string fields, {enum field: allowed}).
+# The order makes validation failures deterministic and stable.
+PROFILE_SECTION_SPECS = (
+    ("institution", ("name", "bic", "jurisdiction"), {}),
+    ("legal_entity", ("name", "lei"), {"authority_status": AUTHORITY_STATES}),
+    (
+        "endpoint",
+        ("wallet_address", "custody", "endpoint_owner", "requested_rail", "uetr"),
+        {"allowlist_status": ALLOWLIST_STATES, "endpoint_payload_status": PAYLOAD_STATES},
+    ),
+    ("fallback", ("fallback_rail", "fallback_currency", "fallback_account_mask", "fallback_intermediary_bic"), {}),
+)
+PROFILE_SECTIONS = frozenset(name for name, _s, _e in PROFILE_SECTION_SPECS)
+
+# Server-owned synthetic source lineage written for every created constituent row
+# (returned parsed, as the existing APIs do). Never client-supplied.
+LINEAGE_PROFILE_INSTITUTION = json.dumps({
+    "kind": "source_lineage",
+    "mode": "synthetic_operator_created_profile",
+    "source_ids": ["iso_20022_concepts", "iban_structure_concepts"],
+    "disclosure": "Synthetic institution profile created via the localhost endpoint-profile API; no external reference row copied.",
+}, sort_keys=True)
+LINEAGE_PROFILE_ENTITY = json.dumps({
+    "kind": "source_lineage",
+    "mode": "synthetic_operator_created_profile",
+    "source_ids": ["lei_authority_concepts"],
+    "disclosure": "Synthetic LEI/vLEI-style authority profile created via the localhost endpoint-profile API; no live GLEIF or vLEI verification claimed.",
+}, sort_keys=True)
+LINEAGE_PROFILE_ENDPOINT = json.dumps({
+    "kind": "source_lineage",
+    "mode": "synthetic_operator_created_profile",
+    "source_ids": ["travel_rule_concepts", "iban_structure_concepts"],
+    "disclosure": "Synthetic wallet and fallback account created via the localhost endpoint-profile API; IBAN/SSI semantics are shape-informed only.",
+}, sort_keys=True)
+PROFILE_INSTITUTION_ROLE = "creditor_agent"
+PROFILE_INSTITUTION_REACHABILITY = "Synthetic institution evidence and fallback SSI holder."
+PROFILE_AUTHORITY_DETAIL = "Synthetic vLEI-style authority evidence represented by the created profile."
+PROFILE_MAINTAINER = "Synthetic treasury operations (localhost demo)."
 
 
 def get_db() -> sqlite3.Connection:
@@ -62,6 +124,11 @@ def health() -> dict:
             "database": "reachable",
             "schema_version": int(schema_version[0]) if schema_version else None,
             "scenario_count": con.execute("SELECT COUNT(*) FROM demo_scenarios").fetchone()[0],
+            # Tenant-scoped like every other profile read: the app owns exactly one
+            # synthetic tenant, so health reports only its profiles.
+            "endpoint_profile_count": con.execute(
+                "SELECT COUNT(*) FROM endpoint_profiles WHERE tenant_id = ?", (TENANT_ID,)
+            ).fetchone()[0],
             "source_file_count": int(source_file_count[0]) if source_file_count else 0,
             "source_row_estimate": int(source_row_estimate[0]) if source_row_estimate else 0,
         }
@@ -263,12 +330,13 @@ def _reject_non_rfc_json_constant(token: str) -> None:
     raise RequestRejected(HTTPStatus.BAD_REQUEST, "invalid_json")
 
 
-def read_json_object(handler: BaseHTTPRequestHandler) -> dict:
+def read_json_object(handler: BaseHTTPRequestHandler, max_bytes: int = MAX_ACTION_BODY_BYTES) -> dict:
     # Fail-closed HTTP framing: this fixed-length JSON endpoint accepts exactly
     # one Content-Length and no Transfer-Encoding. Ambiguous framing (any
     # Transfer-Encoding, or duplicate/conflicting Content-Length) is a request-
     # smuggling vector and is refused before the body is read. Inspect all
-    # Content-Length instances, not only the first.
+    # Content-Length instances, not only the first. ``max_bytes`` bounds the
+    # declared length for this route (small for actions, larger for profiles).
     if handler.headers.get("Transfer-Encoding") is not None:
         raise RequestRejected(HTTPStatus.BAD_REQUEST, "invalid_content_length")
     lengths = handler.headers.get_all("Content-Length") or []
@@ -286,11 +354,11 @@ def read_json_object(handler: BaseHTTPRequestHandler) -> dict:
     # (int() raises past CPython's integer-string digit limit). Leading zeroes
     # are DIGIT grammar: normalize them, then compare by length, then lexically.
     normalized = raw_length.lstrip("0") or "0"
-    max_str = str(MAX_ACTION_BODY_BYTES)
+    max_str = str(max_bytes)
     if len(normalized) > len(max_str) or (len(normalized) == len(max_str) and normalized > max_str):
         # Reject by declared length before reading the body.
         raise RequestRejected(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request_too_large")
-    declared = int(normalized)  # bounded: normalized <= MAX_ACTION_BODY_BYTES
+    declared = int(normalized)  # bounded: normalized <= max_bytes
     raw_body = handler.rfile.read(declared)
     if len(raw_body) < declared:
         # Peer closed before delivering the declared bytes.
@@ -318,6 +386,354 @@ def validated_action(payload: dict) -> tuple[str, str]:
     return action_type, actor
 
 
+# --- Endpoint-profile registry service (SEC-P20) ---------------------------
+# Transactional create / read / update / activate / supersede over first-class,
+# multi-instance synthetic endpoint profiles. Every write validates the exact
+# nested shape, is scoped through the server-owned tenant, and either fully
+# persists or fully fails closed. Evaluation is computed live from the persisted
+# field values via evaluator.evaluate -- never from a scenario slug.
+
+
+def _valid_field_string(value: object) -> bool:
+    # A required, non-empty, bounded, non-blank string. No coercion.
+    return isinstance(value, str) and 1 <= len(value) <= MAX_FIELD_LEN and value.strip() != ""
+
+
+def _validate_section(section: object, string_fields: tuple, enum_fields: dict) -> dict:
+    if not isinstance(section, dict):
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_field")
+    allowed = set(string_fields) | set(enum_fields)
+    keys = set(section)
+    if keys - allowed:  # reject unknown/extra structure, never silently ignore
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "unknown_field")
+    if allowed - keys:
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "missing_field")
+    out = {}
+    for field in string_fields:
+        value = section[field]
+        if not _valid_field_string(value):
+            raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_field")
+        out[field] = value
+    for field, allowed_values in enum_fields.items():
+        value = section[field]
+        if not isinstance(value, str):
+            raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_field")
+        if value not in allowed_values:
+            raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "unsupported_enum")
+        out[field] = value
+    return out
+
+
+def validate_profile_payload(payload: dict) -> dict:
+    """Validate the exact nested profile shape, failing closed with a stable code.
+
+    Rejects unknown/extra structure, missing required sections/fields, wrong
+    types, blank or overlong strings, and unsupported enum values -- without
+    coercion. Returns the four validated sections.
+    """
+    if not isinstance(payload, dict):
+        raise RequestRejected(HTTPStatus.BAD_REQUEST, "invalid_payload")
+    keys = set(payload)
+    if keys - PROFILE_SECTIONS:
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "unknown_field")
+    if PROFILE_SECTIONS - keys:
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "missing_field")
+    return {
+        name: _validate_section(payload[name], string_fields, enum_fields)
+        for name, string_fields, enum_fields in PROFILE_SECTION_SPECS
+    }
+
+
+def _strict_positive_int(value: object) -> bool:
+    # A bounded positive integer; bool is excluded (JSON true/false are ints).
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 2**63 - 1
+
+
+def validated_replacement(payload: dict) -> int:
+    """Extract a strict positive-integer replacement_id from a supersession body."""
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"replacement_id"}
+        or not _strict_positive_int(payload["replacement_id"])
+    ):
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_replacement")
+    return payload["replacement_id"]
+
+
+def parse_profile_id(segment: str) -> int:
+    """Parse a URL path id strictly: ASCII digits, no leading zero, bounded, >= 1.
+
+    The 64-bit upper bound is enforced by DIGIT length/lexicographic comparison
+    BEFORE int(): int() raises past CPython's integer-string digit limit (3.11+
+    and 3.9.14+ backports), so an unbounded conversion of a multi-thousand-digit
+    id would surface as an uncaught 500 instead of a deterministic 400.
+    """
+    if not (segment.isascii() and segment.isdigit()):
+        raise RequestRejected(HTTPStatus.BAD_REQUEST, "invalid_profile_id")
+    if len(segment) > 1 and segment[0] == "0":
+        raise RequestRejected(HTTPStatus.BAD_REQUEST, "invalid_profile_id")
+    # segment is now bare ASCII digits with no leading zero, so a length-then-
+    # lexicographic compare against the 64-bit signed max is exact and total.
+    max_str = str(2**63 - 1)
+    if len(segment) > len(max_str) or (len(segment) == len(max_str) and segment > max_str):
+        raise RequestRejected(HTTPStatus.BAD_REQUEST, "invalid_profile_id")
+    value = int(segment)  # bounded: segment <= 2**63 - 1, safe for int()
+    if value < 1:
+        raise RequestRejected(HTTPStatus.BAD_REQUEST, "invalid_profile_id")
+    return value
+
+
+def profile_rule_input(entity: sqlite3.Row, endpoint: sqlite3.Row) -> dict:
+    """Map a profile's persisted constituent fields to evaluator rule input.
+
+    Institution presence/reachability and legal-entity presence are structural (a
+    well-formed profile always has them); the graded fields come straight from the
+    persisted legal-entity and settlement-endpoint rows, so each profile is
+    evaluated independently with no shared or slug-derived state.
+    """
+    return {
+        "institution_present": True,
+        "institution_reachable": True,
+        "legal_entity_present": True,
+        "authority_status": entity["authority_status"],
+        "allowlist_status": endpoint["allowlist_status"],
+        "payload_status": endpoint["endpoint_payload_status"],
+        "fallback_rail": endpoint["fallback_rail"],
+        "fallback_currency": endpoint["fallback_currency"],
+        "fallback_account_mask": endpoint["fallback_account_mask"],
+        "fallback_intermediary_bic": endpoint["fallback_intermediary_bic"],
+    }
+
+
+def _profile_view(profile: sqlite3.Row) -> dict:
+    return {
+        "id": profile["id"],
+        "tenant_id": profile["tenant_id"],
+        "endpoint_id": profile["endpoint_id"],
+        "lifecycle_state": profile["lifecycle_state"],
+        "superseded_by": profile["superseded_by"],
+        "created_at": profile["created_at"],
+        "updated_at": profile["updated_at"],
+    }
+
+
+def load_profile(profile_id: int) -> dict | None:
+    """Read one tenant-scoped profile with its constituents and live evaluation."""
+    with get_db() as con:
+        profile = con.execute(
+            "SELECT * FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (profile_id, TENANT_ID)
+        ).fetchone()
+        if not profile:
+            return None
+        endpoint = con.execute("SELECT * FROM settlement_endpoints WHERE id = ?", (profile["endpoint_id"],)).fetchone()
+        entity = con.execute("SELECT * FROM legal_entities WHERE id = ?", (endpoint["legal_entity_id"],)).fetchone()
+        institution = con.execute("SELECT * FROM institutions WHERE id = ?", (entity["institution_id"],)).fetchone()
+        return {
+            "profile": _profile_view(profile),
+            "institution": row_dict(institution),
+            "legal_entity": row_dict(entity),
+            "endpoint": row_dict(endpoint),
+            "evaluation": evaluate(profile_rule_input(entity, endpoint)),
+            "boundary": "synthetic_data_only_no_external_network_calls",
+        }
+
+
+def list_profiles() -> list[dict]:
+    """List every tenant-scoped profile with its lifecycle state and live verdict."""
+    with get_db() as con:
+        profiles = con.execute(
+            "SELECT * FROM endpoint_profiles WHERE tenant_id = ? ORDER BY id", (TENANT_ID,)
+        ).fetchall()
+        items = []
+        for profile in profiles:
+            endpoint = con.execute("SELECT * FROM settlement_endpoints WHERE id = ?", (profile["endpoint_id"],)).fetchone()
+            entity = con.execute("SELECT * FROM legal_entities WHERE id = ?", (endpoint["legal_entity_id"],)).fetchone()
+            institution = con.execute("SELECT * FROM institutions WHERE id = ?", (entity["institution_id"],)).fetchone()
+            evaluation = evaluate(profile_rule_input(entity, endpoint))
+            items.append({
+                "id": profile["id"],
+                "lifecycle_state": profile["lifecycle_state"],
+                "endpoint_id": profile["endpoint_id"],
+                "superseded_by": profile["superseded_by"],
+                "bic": institution["bic"],
+                "lei": entity["lei"],
+                "uetr": endpoint["uetr"],
+                "verdict": evaluation["decision"]["verdict"],
+                "created_at": profile["created_at"],
+                "updated_at": profile["updated_at"],
+            })
+        return items
+
+
+def _assert_unique(con: sqlite3.Connection, table: str, column: str, value: str, error: str, exclude_id: int | None = None) -> None:
+    # table/column are fixed internal literals, never caller-derived.
+    if exclude_id is None:
+        row = con.execute(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", (value,)).fetchone()
+    else:
+        row = con.execute(f"SELECT 1 FROM {table} WHERE {column} = ? AND id != ? LIMIT 1", (value, exclude_id)).fetchone()
+    if row:
+        raise RequestRejected(HTTPStatus.CONFLICT, error)
+
+
+def create_profile(sections: dict) -> dict:
+    """Transactionally create a DRAFT profile and its constituent rows."""
+    now = utc_now()
+    inst, le, ep, fb = sections["institution"], sections["legal_entity"], sections["endpoint"], sections["fallback"]
+    with get_db() as con:
+        try:
+            with con:  # one transaction: all four rows persist or none do
+                _assert_unique(con, "institutions", "bic", inst["bic"], "duplicate_bic")
+                _assert_unique(con, "legal_entities", "lei", le["lei"], "duplicate_lei")
+                _assert_unique(con, "settlement_endpoints", "uetr", ep["uetr"], "duplicate_uetr")
+                inst_id = con.execute(
+                    "INSERT INTO institutions(role, name, bic, jurisdiction, reachability, source_lineage) VALUES (?,?,?,?,?,?)",
+                    (PROFILE_INSTITUTION_ROLE, inst["name"], inst["bic"], inst["jurisdiction"], PROFILE_INSTITUTION_REACHABILITY, LINEAGE_PROFILE_INSTITUTION),
+                ).lastrowid
+                le_id = con.execute(
+                    "INSERT INTO legal_entities(institution_id, name, lei, authority_status, authority_detail, maintainer, source_lineage) VALUES (?,?,?,?,?,?,?)",
+                    (inst_id, le["name"], le["lei"], le["authority_status"], PROFILE_AUTHORITY_DETAIL, PROFILE_MAINTAINER, LINEAGE_PROFILE_ENTITY),
+                ).lastrowid
+                ep_id = con.execute(
+                    "INSERT INTO settlement_endpoints(legal_entity_id, wallet_address, custody, allowlist_status, endpoint_owner, endpoint_payload_status, requested_rail, fallback_rail, fallback_currency, fallback_account_mask, fallback_intermediary_bic, uetr, source_lineage)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (le_id, ep["wallet_address"], ep["custody"], ep["allowlist_status"], ep["endpoint_owner"], ep["endpoint_payload_status"], ep["requested_rail"], fb["fallback_rail"], fb["fallback_currency"], fb["fallback_account_mask"], fb["fallback_intermediary_bic"], ep["uetr"], LINEAGE_PROFILE_ENDPOINT),
+                ).lastrowid
+                profile_id = con.execute(
+                    "INSERT INTO endpoint_profiles(tenant_id, endpoint_id, lifecycle_state, superseded_by, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                    (TENANT_ID, ep_id, LIFECYCLE_DRAFT, None, now, now),
+                ).lastrowid
+        except sqlite3.IntegrityError:
+            # A concurrent create racing the same unique value: fail closed with a
+            # stable conflict, never a partial write (the transaction rolled back).
+            raise RequestRejected(HTTPStatus.CONFLICT, "conflict")
+        return load_profile(profile_id)
+
+
+def update_profile(profile_id: int, sections: dict) -> dict | None:
+    """Transactionally replace a DRAFT profile's constituent fields.
+
+    Active or superseded profiles are immutable through this API; the update fails
+    closed with no write.
+    """
+    now = utc_now()
+    inst, le, ep, fb = sections["institution"], sections["legal_entity"], sections["endpoint"], sections["fallback"]
+    with get_db() as con:
+        try:
+            with con:
+                # Take the write lock before the draft precondition read so the
+                # check and the constituent rewrites are one serialized transaction.
+                # Otherwise a competing activation can linearize between this read
+                # and the writes, and the update would then mutate an already-active
+                # profile; BEGIN IMMEDIATE forecloses that window and a competing
+                # activation re-reads the draft state under its own lock.
+                con.execute("BEGIN IMMEDIATE")
+                profile = con.execute(
+                    "SELECT * FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (profile_id, TENANT_ID)
+                ).fetchone()
+                if not profile:
+                    return None
+                if profile["lifecycle_state"] != LIFECYCLE_DRAFT:
+                    raise RequestRejected(HTTPStatus.CONFLICT, "profile_not_draft")
+                endpoint = con.execute("SELECT * FROM settlement_endpoints WHERE id = ?", (profile["endpoint_id"],)).fetchone()
+                entity = con.execute("SELECT * FROM legal_entities WHERE id = ?", (endpoint["legal_entity_id"],)).fetchone()
+                _assert_unique(con, "institutions", "bic", inst["bic"], "duplicate_bic", exclude_id=entity["institution_id"])
+                _assert_unique(con, "legal_entities", "lei", le["lei"], "duplicate_lei", exclude_id=entity["id"])
+                _assert_unique(con, "settlement_endpoints", "uetr", ep["uetr"], "duplicate_uetr", exclude_id=endpoint["id"])
+                con.execute(
+                    "UPDATE institutions SET name=?, bic=?, jurisdiction=? WHERE id=?",
+                    (inst["name"], inst["bic"], inst["jurisdiction"], entity["institution_id"]),
+                )
+                con.execute(
+                    "UPDATE legal_entities SET name=?, lei=?, authority_status=? WHERE id=?",
+                    (le["name"], le["lei"], le["authority_status"], entity["id"]),
+                )
+                con.execute(
+                    "UPDATE settlement_endpoints SET wallet_address=?, custody=?, allowlist_status=?, endpoint_owner=?, endpoint_payload_status=?, requested_rail=?, fallback_rail=?, fallback_currency=?, fallback_account_mask=?, fallback_intermediary_bic=?, uetr=? WHERE id=?",
+                    (ep["wallet_address"], ep["custody"], ep["allowlist_status"], ep["endpoint_owner"], ep["endpoint_payload_status"], ep["requested_rail"], fb["fallback_rail"], fb["fallback_currency"], fb["fallback_account_mask"], fb["fallback_intermediary_bic"], ep["uetr"], endpoint["id"]),
+                )
+                con.execute("UPDATE endpoint_profiles SET updated_at=? WHERE id=?", (now, profile_id))
+        except sqlite3.IntegrityError:
+            raise RequestRejected(HTTPStatus.CONFLICT, "conflict")
+        return load_profile(profile_id)
+
+
+def activate_profile(profile_id: int) -> dict | None:
+    """Transition a DRAFT profile to ACTIVE. Any other state fails closed."""
+    now = utc_now()
+    with get_db() as con:
+        with con:
+            # Acquire the write lock BEFORE the precondition read so the state
+            # check and the transition write are one serialized transaction. With
+            # ThreadingHTTPServer a deferred transaction would read the lifecycle
+            # state outside any lock, letting two concurrent activations both pass
+            # the draft check and both write; BEGIN IMMEDIATE serializes them so
+            # the loser re-reads the linearized state and fails closed. Rollback
+            # still flows through the existing connection context.
+            con.execute("BEGIN IMMEDIATE")
+            profile = con.execute(
+                "SELECT * FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (profile_id, TENANT_ID)
+            ).fetchone()
+            if not profile:
+                return None
+            if profile["lifecycle_state"] != LIFECYCLE_DRAFT:
+                raise RequestRejected(HTTPStatus.CONFLICT, "invalid_transition")
+            con.execute(
+                "UPDATE endpoint_profiles SET lifecycle_state=?, updated_at=? WHERE id=?",
+                (LIFECYCLE_ACTIVE, now, profile_id),
+            )
+        return load_profile(profile_id)
+
+
+def supersede_profile(profile_id: int, replacement_id: int) -> dict | None:
+    """Atomically supersede an ACTIVE profile with a DRAFT replacement.
+
+    The active profile becomes superseded (linked to its replacement) and the
+    draft replacement becomes active, in one transaction. A malformed relationship
+    (self, non-active source, missing or non-draft replacement) fails closed with
+    no partial write. There is no transition out of superseded, and the old
+    profile and all of its history are preserved.
+    """
+    now = utc_now()
+    with get_db() as con:
+        with con:
+            # Serialize the whole replacement (both state reads and both writes) so
+            # two concurrent supersessions of the same active source cannot each
+            # promote a different draft replacement. BEGIN IMMEDIATE takes the write
+            # lock before the state reads; the loser re-reads the now-superseded
+            # source and fails closed, leaving its replacement a draft. Rollback
+            # flows through the existing connection context.
+            con.execute("BEGIN IMMEDIATE")
+            active = con.execute(
+                "SELECT * FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (profile_id, TENANT_ID)
+            ).fetchone()
+            if not active:
+                return None
+            if active["lifecycle_state"] != LIFECYCLE_ACTIVE:
+                raise RequestRejected(HTTPStatus.CONFLICT, "invalid_transition")
+            if replacement_id == profile_id:
+                raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_replacement")
+            replacement = con.execute(
+                "SELECT * FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (replacement_id, TENANT_ID)
+            ).fetchone()
+            if not replacement:
+                raise RequestRejected(HTTPStatus.NOT_FOUND, "replacement_not_found")
+            if replacement["lifecycle_state"] != LIFECYCLE_DRAFT:
+                raise RequestRejected(HTTPStatus.CONFLICT, "invalid_transition")
+            con.execute(
+                "UPDATE endpoint_profiles SET lifecycle_state=?, superseded_by=?, updated_at=? WHERE id=?",
+                (LIFECYCLE_SUPERSEDED, replacement_id, now, profile_id),
+            )
+            con.execute(
+                "UPDATE endpoint_profiles SET lifecycle_state=?, updated_at=? WHERE id=?",
+                (LIFECYCLE_ACTIVE, now, replacement_id),
+            )
+        return {
+            "status": "superseded",
+            "profile": load_profile(profile_id),
+            "replacement": load_profile(replacement_id),
+        }
+
+
 # --- Structured local request/error logging (SEC-O20) -----------------------
 # Diagnosable JSON Lines on stderr using only the standard library. Every record
 # is built from a fixed field allowlist, so no request body, response payload,
@@ -326,7 +742,7 @@ def validated_action(payload: dict) -> tuple[str, str]:
 # readiness banner stays on stdout and is unchanged.
 
 _FIXED_ROUTES = frozenset(
-    {"/", "/readyz", "/api/scenarios", "/api/audit/counts", "/api/source-manifest"}
+    {"/", "/readyz", "/api/scenarios", "/api/audit/counts", "/api/source-manifest", "/api/endpoint-profiles"}
 )
 
 
@@ -353,6 +769,12 @@ def normalized_route(raw_target: str) -> str:
         return "/api/evidence/{slug}"
     if path.startswith("/api/scenarios/") and segments == 3:
         return "/api/scenarios/{slug}"
+    if path.startswith("/api/endpoint-profiles/") and path.endswith("/activation") and segments == 4:
+        return "/api/endpoint-profiles/{id}/activation"
+    if path.startswith("/api/endpoint-profiles/") and path.endswith("/supersession") and segments == 4:
+        return "/api/endpoint-profiles/{id}/supersession"
+    if path.startswith("/api/endpoint-profiles/") and segments == 3:
+        return "/api/endpoint-profiles/{id}"
     return "/{other}"
 
 
@@ -495,8 +917,26 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"audit_counts": audit_counts()})
             elif path == "/api/source-manifest":
                 self.send_json(load_source_manifest())
+            elif path == "/api/endpoint-profiles":
+                self.send_json({"endpoint_profiles": list_profiles()})
+            elif path.startswith("/api/endpoint-profiles/"):
+                parts = path.split("/")
+                if len(parts) != 4:
+                    self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    payload = load_profile(parse_profile_id(parts[3]))
+                    if payload is None:
+                        self.send_json({"error": "profile_not_found"}, HTTPStatus.NOT_FOUND)
+                    else:
+                        self.send_json(payload)
             else:
                 self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+        except RequestRejected as exc:
+            # A strict numeric-id rejection on a read path: stable code, logged
+            # with the code as category (a fixed string, never caller-derived).
+            method, path = self._request_context()
+            log_error_event(method, path, exc.error, exc, status=int(exc.status))
+            self.send_json({"error": exc.error}, exc.status)
         except sqlite3.Error as exc:
             method, path = self._request_context()
             log_error_event(method, path, "database_error", exc)
@@ -517,7 +957,43 @@ class Handler(BaseHTTPRequestHandler):
             # Parse inside the try so a malformed target (urlparse ValueError)
             # enters the deterministic structured internal-error path below.
             path = urlparse(self.path).path.rstrip("/") or "/"
-            if path.startswith("/api/scenarios/") and path.endswith("/actions"):
+            if path == "/api/endpoint-profiles":
+                require_json_content_type(self.headers)
+                require_allowed_origin(self.headers)
+                payload = read_json_object(self, MAX_PROFILE_BODY_BYTES)
+                self.send_json(create_profile(validate_profile_payload(payload)), HTTPStatus.CREATED)
+            elif path.startswith("/api/endpoint-profiles/") and path.endswith("/activation"):
+                parts = path.split("/")
+                if len(parts) != 5:
+                    self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                require_json_content_type(self.headers)
+                require_allowed_origin(self.headers)
+                profile_id = parse_profile_id(parts[3])
+                # Activation takes no parameters; require an empty JSON object so
+                # the strict-json write boundary still applies. Any content is rejected.
+                if read_json_object(self, MAX_ACTION_BODY_BYTES) != {}:
+                    raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "unknown_field")
+                result = activate_profile(profile_id)
+                if result is None:
+                    self.send_json({"error": "profile_not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self.send_json(result)
+            elif path.startswith("/api/endpoint-profiles/") and path.endswith("/supersession"):
+                parts = path.split("/")
+                if len(parts) != 5:
+                    self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                require_json_content_type(self.headers)
+                require_allowed_origin(self.headers)
+                profile_id = parse_profile_id(parts[3])
+                replacement_id = validated_replacement(read_json_object(self, MAX_ACTION_BODY_BYTES))
+                result = supersede_profile(profile_id, replacement_id)
+                if result is None:
+                    self.send_json({"error": "profile_not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self.send_json(result)
+            elif path.startswith("/api/scenarios/") and path.endswith("/actions"):
                 parts = path.split("/")
                 if len(parts) != 5:
                     self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
@@ -554,6 +1030,59 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"status": "error", "detail": "internal_error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             except Exception:  # noqa: BLE001 - response channel already broken
                 pass
+
+    def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
+        try:
+            # Parse inside the try so a malformed target (urlparse ValueError)
+            # enters the deterministic structured internal-error path below.
+            path = urlparse(self.path).path.rstrip("/") or "/"
+            parts = path.split("/")
+            if path.startswith("/api/endpoint-profiles/") and len(parts) == 4:
+                require_json_content_type(self.headers)
+                require_allowed_origin(self.headers)
+                profile_id = parse_profile_id(parts[3])
+                payload = read_json_object(self, MAX_PROFILE_BODY_BYTES)
+                result = update_profile(profile_id, validate_profile_payload(payload))
+                if result is None:
+                    self.send_json({"error": "profile_not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self.send_json(result)
+            else:
+                self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+        except RequestRejected as exc:
+            method, path = self._request_context()
+            log_error_event(method, path, exc.error, exc, status=int(exc.status))
+            self.send_json({"error": exc.error}, exc.status)
+        except sqlite3.Error as exc:
+            method, path = self._request_context()
+            log_error_event(method, path, "database_error", exc)
+            self.send_json(
+                {"status": "error", "database": "unreachable", "detail": "database_error"},
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        except Exception as exc:  # noqa: BLE001 - deterministic 500, never leak a traceback
+            method, path = self._request_context()
+            log_error_event(method, path, "internal_error", exc)
+            try:
+                self.send_json({"status": "error", "detail": "internal_error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            except Exception:  # noqa: BLE001 - response channel already broken
+                pass
+
+    def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+        # There is no delete route: endpoint-profile history (scenario, decision,
+        # audit, action, and source lineage) is preserved. A profile detail
+        # resource answers 405 method_not_allowed; anything else is 404. No row is
+        # ever deleted.
+        try:
+            path = urlparse(self.path).path.rstrip("/") or "/"
+        except ValueError:
+            self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+            return
+        parts = path.split("/")
+        if path.startswith("/api/endpoint-profiles/") and len(parts) == 4:
+            self.send_json({"error": "method_not_allowed"}, HTTPStatus.METHOD_NOT_ALLOWED)
+        else:
+            self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
 
 def main() -> None:
