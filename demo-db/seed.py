@@ -9,12 +9,15 @@ import json
 import sqlite3
 from pathlib import Path
 
+import migrate
 from evaluator import evaluate
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "data" / "demo.sqlite"
 MANIFEST_PATH = ROOT / "source_manifest.json"
-SCHEMA_VERSION = 3
+# Single source of truth for the current schema version lives in migrate.py so the
+# destructive fresh seed and the nondestructive migration path can never drift.
+SCHEMA_VERSION = migrate.CURRENT_SCHEMA_VERSION
 
 LINEAGE_BIC = json.dumps({
     "kind": "source_lineage",
@@ -261,6 +264,7 @@ def seed() -> dict[str, int | str]:
         DB_PATH.unlink()
     with connect() as con:
         con.executescript(SCHEMA)
+        con.executescript(migrate.SCHEMA_MIGRATIONS_DDL)
         with con:
             for table in ["operator_actions", "audit_events", "route_decisions", "policy_checks", "demo_scenarios", "route_policies", "settlement_endpoints", "legal_entities", "institutions", "source_manifest"]:
                 con.execute(f"DELETE FROM {table}")
@@ -332,8 +336,19 @@ def seed() -> dict[str, int | str]:
             con.execute("INSERT OR REPLACE INTO seed_meta(key, value) VALUES (?,?)", ("source_row_estimate", str(manifest["lineage_summary"]["source_row_estimate"])))
             con.execute("INSERT OR REPLACE INTO seed_meta(key, value) VALUES (?,?)", ("source_manifest_boundary", manifest["boundary"]))
 
+            # Foundation metadata: a freshly seeded DB is born at the current
+            # version with the migration ledger already populated. The ledger
+            # applied_at uses the same fixed fixture time so fresh seed stays
+            # byte-deterministic; PRAGMA user_version is the authoritative marker.
+            for version, name in migrate.current_ledger():
+                con.execute(
+                    "INSERT OR REPLACE INTO schema_migrations(version, name, applied_at) VALUES (?,?,?)",
+                    (version, name, fixed_time),
+                )
+            con.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+
         counts = {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in [
-            "institutions", "legal_entities", "settlement_endpoints", "route_policies", "demo_scenarios", "policy_checks", "route_decisions", "audit_events", "operator_actions", "source_manifest"
+            "institutions", "legal_entities", "settlement_endpoints", "route_policies", "demo_scenarios", "policy_checks", "route_decisions", "audit_events", "operator_actions", "source_manifest", "schema_migrations"
         ]}
         counts["database"] = str(DB_PATH)
         return counts

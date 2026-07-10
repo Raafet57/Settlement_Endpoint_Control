@@ -25,6 +25,7 @@ EXPECTED_TABLE_COUNTS = {
     "audit_events": 18,
     "operator_actions": 0,
     "source_manifest": 4,
+    "schema_migrations": 1,
 }
 EXPECTED_SLUGS = {"blocked", "refreshed", "authority"}
 EXPECTED_VERDICTS = {
@@ -103,7 +104,7 @@ def main() -> None:
         ready = wait_ready(base)
         if ready.get("status") != "ok" or ready.get("database") != "reachable" or ready.get("scenario_count") != 3:
             raise SystemExit(f"READYZ_BAD {ready}")
-        if ready.get("schema_version") != 3 or ready.get("source_file_count") != 4 or ready.get("source_row_estimate") != 0:
+        if ready.get("schema_version") != 4 or ready.get("source_file_count") != 4 or ready.get("source_row_estimate") != 0:
             raise SystemExit(f"READYZ_SOURCE_BAD {ready}")
 
         with urllib.request.urlopen(base + "/", timeout=4) as response:  # noqa: S310 - localhost smoke only
