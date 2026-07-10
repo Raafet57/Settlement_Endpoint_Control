@@ -91,6 +91,14 @@
     const $ = id => document.getElementById(id);
     const classFor = value => value === 'bad' ? 'bad' : value === 'warn' ? 'warn' : 'good';
     const fmt = value => Number(value).toLocaleString('en-US');
+    // Build a DOM node without an innerHTML sink: API-derived text goes through
+    // textContent so markup-like values can never be parsed as HTML.
+    const el = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined && text !== null) node.textContent = text;
+      return node;
+    };
 
     async function json(path) {
       const res = await fetch(path, { cache: 'no-store' });
@@ -109,7 +117,11 @@
       $('health').className = 'pill good';
       $('health').textContent = `DB ${ready.database} · scenarios ${ready.scenario_count} · references ${ready.source_file_count} · imported rows ${fmt(ready.source_row_estimate)}`;
       const list = await json('/api/scenarios');
-      $('scenarioSelect').innerHTML = list.scenarios.map(s => `<option value="${s.slug}">${s.title}</option>`).join('');
+      $('scenarioSelect').replaceChildren(...list.scenarios.map(s => {
+        const opt = el('option', null, s.title);
+        opt.value = s.slug;
+        return opt;
+      }));
       await loadScenario($('scenarioSelect').value);
     }
 
@@ -122,24 +134,88 @@
       $('title').textContent = s.title;
       $('decisionPill').className = `pill ${s.decision_class}`;
       $('decisionPill').textContent = s.decision_label;
-      $('context').innerHTML = [
+      $('context').replaceChildren(...[
         ['State', s.state], ['Creditor BIC', creditor.bic], ['UETR', endpoint.uetr], ['Requested rail', endpoint.requested_rail], ['Fallback', `${endpoint.fallback_currency} · ${endpoint.fallback_account_mask}`]
-      ].map(([k,v]) => `<div class="row"><small>${k}</small><div class="mono">${v}</div></div>`).join('');
-      $('entity').innerHTML = `<strong>${entity.name}</strong><br><span class="mono">LEI ${entity.lei}</span><p>${s.authority_display}</p>`;
-      $('endpoint').innerHTML = `<strong class="mono">${endpoint.wallet_address}</strong><p>${s.custody_display}<br>${s.allowlist_display}<br>${s.owner_display}</p>`;
-      $('checks').innerHTML = data.checks.map(c => `<article class="check"><span><strong>${c.name}</strong><br><small>${c.detail}</small></span><span class="pill ${classFor(c.status)}">${c.status === 'bad' ? 'fail' : c.status === 'warn' ? 'watch' : 'pass'}</span></article>`).join('');
+      ].map(([k,v]) => {
+        const row = el('div', 'row');
+        row.append(el('small', null, k), el('div', 'mono', v));
+        return row;
+      }));
+      $('entity').replaceChildren(
+        el('strong', null, entity.name),
+        el('br'),
+        el('span', 'mono', `LEI ${entity.lei}`),
+        el('p', null, s.authority_display),
+      );
+      const endpointPara = el('p');
+      endpointPara.append(
+        document.createTextNode(s.custody_display),
+        el('br'),
+        document.createTextNode(s.allowlist_display),
+        el('br'),
+        document.createTextNode(s.owner_display),
+      );
+      $('endpoint').replaceChildren(el('strong', 'mono', endpoint.wallet_address), endpointPara);
+      $('checks').replaceChildren(...data.checks.map(c => {
+        const article = el('article', 'check');
+        const left = el('span');
+        left.append(el('strong', null, c.name), el('br'), el('small', null, c.detail));
+        const statusText = c.status === 'bad' ? 'fail' : c.status === 'warn' ? 'watch' : 'pass';
+        article.append(left, el('span', `pill ${classFor(c.status)}`, statusText));
+        return article;
+      }));
       $('tokenRoute').textContent = data.decision.token_text;
       $('fiatRoute').textContent = data.decision.fiat_text;
-      $('audit').innerHTML = data.audit_events.map(e => `<article class="event"><strong>${e.display_order}. ${e.title}</strong><br><small>${e.detail}</small> <span class="pill ${e.event_type === 'exception' ? 'bad' : e.event_type === 'decision' ? 'warn' : 'info'}">${e.event_type}</span></article>`).join('');
-      $('operatorActions').innerHTML = data.operator_actions.length
-        ? data.operator_actions.map(a => `<article class="event"><strong>${a.action_type}</strong><br><small>${a.detail}</small><br><span class="pill info">${a.status}</span> <span class="mono">${a.created_at}</span></article>`).join('')
-        : '<article class="event"><small>No operator action persisted yet. Use the controls to write one into SQLite, then reload/read back.</small></article>';
+      $('audit').replaceChildren(...data.audit_events.map(e => {
+        const article = el('article', 'event');
+        const pillClass = e.event_type === 'exception' ? 'bad' : e.event_type === 'decision' ? 'warn' : 'info';
+        article.append(
+          el('strong', null, `${e.display_order}. ${e.title}`),
+          el('br'),
+          el('small', null, e.detail),
+          document.createTextNode(' '),
+          el('span', `pill ${pillClass}`, e.event_type),
+        );
+        return article;
+      }));
+      if (data.operator_actions.length) {
+        $('operatorActions').replaceChildren(...data.operator_actions.map(a => {
+          const article = el('article', 'event');
+          article.append(
+            el('strong', null, a.action_type),
+            el('br'),
+            el('small', null, a.detail),
+            el('br'),
+            el('span', 'pill info', a.status),
+            document.createTextNode(' '),
+            el('span', 'mono', a.created_at),
+          );
+          return article;
+        }));
+      } else {
+        const empty = el('article', 'event');
+        empty.append(el('small', null, 'No operator action persisted yet. Use the controls to write one into SQLite, then reload/read back.'));
+        $('operatorActions').replaceChildren(empty);
+      }
       const summary = data.source_manifest_summary;
       const lineageItems = [creditor, entity, endpoint].map(item => item.source_lineage);
-      $('lineage').innerHTML = [
-        `<article class="lineage"><strong>Reference manifest</strong><br><small>${summary.source_file_count} public reference descriptors · ${fmt(summary.source_row_estimate)} imported source rows.</small></article>`,
-        ...lineageItems.map(l => `<article class="lineage"><strong>${l.mode}</strong><br><small>${l.disclosure}</small><br><span class="mono">${l.source_ids.join(', ')}</span></article>`)
-      ].join('');
+      const manifestCard = el('article', 'lineage');
+      manifestCard.append(
+        el('strong', null, 'Reference manifest'),
+        el('br'),
+        el('small', null, `${summary.source_file_count} public reference descriptors · ${fmt(summary.source_row_estimate)} imported source rows.`),
+      );
+      $('lineage').replaceChildren(manifestCard, ...lineageItems.map(l => {
+        const card = el('article', 'lineage');
+        card.append(
+          el('strong', null, l.mode),
+          el('br'),
+          el('small', null, l.disclosure),
+          el('br'),
+          el('span', 'mono', l.source_ids.join(', ')),
+        );
+        return card;
+      }));
       $('sourceDisclosure').textContent = summary.display_disclosure;
       $('payload').textContent = JSON.stringify(data, null, 2);
     }
