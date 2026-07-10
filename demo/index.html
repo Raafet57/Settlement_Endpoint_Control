@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+  <title>Settlement Endpoint Control Tower</title>
+  <meta name="description" content="Production-shaped synthetic demo for pre-validating identity-bound settlement endpoints across tokenized and fiat rails." />
+  <script>
+    /* Apply theme before paint to avoid a flash. Defaults to the light brand system
+       unless the user has chosen dark, or their OS prefers dark with no saved choice. */
+    (function () {
+      try {
+        var saved = localStorage.getItem('theme');
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = saved || (prefersDark ? 'dark' : 'light');
+        if (theme === 'dark') document.documentElement.classList.add('dark');
+      } catch (e) { /* no storage access: stay on light brand default */ }
+    })();
+  </script>
+  <style>
+    /* Product token system.
+       HSL values without hsl() wrapper so alpha modifiers compose. */
+    :root {
+      --background: 210 20% 98%;
+      --foreground: 222 47% 11%;
+      --card: 0 0% 100%;
+      --card-foreground: 222 47% 11%;
+      --card-border: 214 20% 92%;
+      --border: 214 20% 90%;
+      --primary: 199 89% 48%;
+      --primary-foreground: 0 0% 100%;
+      --secondary: 214 20% 94%;
+      --secondary-foreground: 222 47% 11%;
+      --muted: 214 20% 92%;
+      --muted-foreground: 215 16% 47%;
+      --accent: 172 66% 50%;
+      --accent-foreground: 222 47% 11%;
+      --destructive: 0 84% 60%;
+      --destructive-foreground: 0 0% 98%;
+      --input: 214 20% 85%;
+      --ring: 199 89% 48%;
+      --popover: 0 0% 100%;
+      --popover-border: 214 20% 90%;
+      --sidebar: 222 47% 11%;
+      --sidebar-foreground: 210 20% 98%;
+      --sidebar-border: 222 40% 18%;
+      --warning: 38 88% 46%;
+      /* Readable status text tuned for light surfaces */
+      --success-fg: 172 72% 30%;
+      --warning-fg: 35 90% 36%;
+      --danger-fg: 0 70% 46%;
+      --info-fg: 199 89% 38%;
+      --elevate-1: rgba(0,0,0,0.03);
+      --elevate-2: rgba(0,0,0,0.08);
+      --radius: 0.5rem;
+      font-family: Inter, "Plus Jakarta Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    html.dark {
+      --background: 222 47% 7%;
+      --foreground: 210 20% 98%;
+      --card: 222 47% 11%;
+      --card-foreground: 210 20% 98%;
+      --card-border: 222 40% 16%;
+      --border: 222 40% 18%;
+      --secondary: 222 40% 18%;
+      --secondary-foreground: 210 20% 98%;
+      --muted: 222 40% 16%;
+      --muted-foreground: 215 16% 60%;
+      --input: 222 40% 22%;
+      --popover: 222 47% 11%;
+      --popover-border: 222 40% 18%;
+      --sidebar: 222 47% 5%;
+      --sidebar-border: 222 40% 12%;
+      --success-fg: 172 66% 56%;
+      --warning-fg: 43 90% 62%;
+      --danger-fg: 0 84% 70%;
+      --info-fg: 199 89% 62%;
+      --elevate-1: rgba(255,255,255,0.04);
+      --elevate-2: rgba(255,255,255,0.09);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: hsl(var(--foreground));
+      background: hsl(var(--background));
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    button, select, input { font: inherit; }
+    button { min-height: 44px; }
+    .mono { font-family: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .shell { max-width: 1280px; margin: 0 auto; padding: 24px 20px 32px; }
+
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; color: hsl(var(--muted-foreground)); font-size: 13px; flex-wrap: wrap; }
+    .brandline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .dot-mark { width: 9px; height: 9px; border-radius: 50%; background: hsl(var(--primary)); }
+    .topbar-right { display: flex; align-items: center; gap: 12px; }
+    .theme-toggle {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      min-height: 44px; min-width: 44px; padding: 0 14px;
+      border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+      background: hsl(var(--card)); color: hsl(var(--foreground));
+      font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: background .15s ease, border-color .15s ease, color .15s ease;
+    }
+    .theme-toggle:hover { background: hsl(var(--secondary)); }
+    .theme-toggle:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+    .theme-toggle svg { width: 17px; height: 17px; }
+    .theme-toggle .icon-sun { display: none; }
+    .theme-toggle .label-dark { display: inline; }
+    .theme-toggle .label-light { display: none; }
+    html.dark .theme-toggle .icon-sun { display: inline; }
+    html.dark .theme-toggle .icon-moon { display: none; }
+    html.dark .theme-toggle .label-dark { display: none; }
+    html.dark .theme-toggle .label-light { display: inline; }
+
+    .badge, .pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 5px 10px; border-radius: 999px;
+      border: 1px solid hsl(var(--border));
+      background: hsl(var(--secondary));
+      color: hsl(var(--muted-foreground));
+      font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap;
+    }
+    .good { color: hsl(var(--success-fg)); border-color: hsl(var(--accent) / .42); background: hsl(var(--accent) / .12); }
+    .warn { color: hsl(var(--warning-fg)); border-color: hsl(var(--warning) / .42); background: hsl(var(--warning) / .14); }
+    .bad { color: hsl(var(--danger-fg)); border-color: hsl(var(--destructive) / .42); background: hsl(var(--destructive) / .10); }
+    .info { color: hsl(var(--info-fg)); border-color: hsl(var(--primary) / .42); background: hsl(var(--primary) / .10); }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(300px, .92fr);
+      border: 1px solid hsl(var(--card-border));
+      border-radius: 16px;
+      background: hsl(var(--card));
+      overflow: hidden;
+    }
+    .hero { padding: clamp(24px, 3vw, 40px); min-width: 0; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 8px; color: hsl(var(--primary)); letter-spacing: .12em; text-transform: uppercase; font-size: 12px; font-weight: 600; margin-bottom: 16px; }
+    h1 { font-size: clamp(30px, 4.4vw, 52px); line-height: 1.06; letter-spacing: -.022em; margin: 0; max-width: 660px; text-wrap: balance; font-weight: 700; }
+    h1 .hl { color: hsl(var(--primary)); }
+    .subtitle { color: hsl(var(--muted-foreground)); font-size: clamp(15px, 1.3vw, 18px); line-height: 1.6; max-width: 640px; margin: 18px 0 0; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      min-height: 44px; padding: 11px 18px;
+      border: 1px solid hsl(var(--border));
+      color: hsl(var(--foreground));
+      background: hsl(var(--card));
+      border-radius: var(--radius);
+      font-size: 14px; font-weight: 500; cursor: pointer;
+      transition: background .15s ease, border-color .15s ease, color .15s ease;
+    }
+    .btn:hover { background: hsl(var(--secondary)); }
+    .btn:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+    .btn.primary { background: hsl(var(--primary)); border-color: hsl(var(--primary)); color: hsl(var(--primary-foreground)); font-weight: 600; }
+    .btn.primary:hover { background: hsl(199 89% 43%); }
+    .btn.danger { color: hsl(var(--danger-fg)); border-color: hsl(var(--destructive) / .42); }
+
+    /* Claim boundary uses the brand dark-navy panel to signal trust/evidence. */
+    .status-card { padding: clamp(22px, 2.5vw, 30px); background: hsl(var(--sidebar)); color: hsl(var(--sidebar-foreground)); display: grid; gap: 16px; align-content: start; }
+    .status-card h2 { font-size: 16px; margin: 0; font-weight: 600; }
+    .status-card p { color: hsl(210 20% 80%); line-height: 1.55; margin: 0; font-size: 13.5px; }
+    .status-grid { display: grid; gap: 6px; }
+    .status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid hsl(var(--sidebar-border)); }
+    .status-row:first-child { border-top: 0; }
+    .status-row > span:first-child { color: hsl(210 20% 78%); font-size: 13px; }
+    .status-card .pill { background: hsl(var(--sidebar-border) / .55); border-color: hsl(var(--sidebar-border)); color: hsl(210 20% 88%); }
+    .status-card .pill.good { color: hsl(172 66% 62%); border-color: hsl(172 66% 50% / .4); background: hsl(172 66% 50% / .14); }
+    .status-card .pill.warn { color: hsl(43 92% 66%); border-color: hsl(43 88% 55% / .4); background: hsl(43 88% 55% / .14); }
+    .status-card .pill.info { color: hsl(199 89% 66%); border-color: hsl(199 89% 55% / .4); background: hsl(199 89% 55% / .14); }
+    .status-card .pill.bad { color: hsl(0 84% 72%); border-color: hsl(0 84% 60% / .4); background: hsl(0 84% 60% / .14); }
+
+    main { display: grid; gap: 20px; margin-top: 20px; }
+    .control-strip {
+      position: sticky; top: 0; z-index: 20;
+      display: grid; gap: 12px;
+      padding: 12px;
+      border: 1px solid hsl(var(--card-border));
+      border-radius: 14px;
+      background: hsl(var(--background) / .85);
+      backdrop-filter: blur(12px);
+    }
+    .tabs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
+    .tab {
+      min-height: 44px;
+      border: 1px solid hsl(var(--border));
+      background: hsl(var(--card));
+      color: hsl(var(--muted-foreground));
+      padding: 10px 14px; border-radius: var(--radius);
+      font-size: 14px; font-weight: 500; cursor: pointer; white-space: nowrap;
+      transition: background .15s ease, color .15s ease, border-color .15s ease;
+    }
+    .tab:hover { background: hsl(var(--secondary)); color: hsl(var(--foreground)); }
+    .tab:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+    .tab[aria-selected="true"] { color: hsl(var(--primary-foreground)); background: hsl(var(--primary)); border-color: hsl(var(--primary)); font-weight: 600; }
+    .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .select-wrap { display: flex; align-items: center; gap: 8px; color: hsl(var(--muted-foreground)); font-size: 13px; }
+    select {
+      min-height: 44px; color: hsl(var(--foreground));
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--input)); border-radius: var(--radius);
+      padding: 0 12px; cursor: pointer;
+    }
+    select:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+
+    .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 20px; align-items: start; }
+    .card { border: 1px solid hsl(var(--card-border)); border-radius: 14px; background: hsl(var(--card)); overflow: hidden; }
+    .card-head { padding: 16px 18px; border-bottom: 1px solid hsl(var(--card-border)); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .card-head h2, .card-head h3 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+    .card-body { padding: 18px; }
+    .kv { display: grid; gap: 10px; }
+    .kv-row { padding: 13px; border: 1px solid hsl(var(--border)); border-radius: 10px; background: hsl(var(--secondary) / .45); }
+    .kv-row .label { color: hsl(var(--muted-foreground)); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 6px; font-weight: 500; }
+    .kv-row .value { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+    .kv-row .detail { color: hsl(var(--muted-foreground)); margin-top: 5px; font-size: 12px; line-height: 1.4; }
+    .workspace { min-height: 720px; }
+    .view { display: none; }
+    .view.active { display: block; }
+    .screen-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+    .screen-title h2 { margin: 0; font-size: clamp(22px, 2.6vw, 30px); line-height: 1.15; letter-spacing: -.02em; font-weight: 700; text-wrap: balance; }
+    .screen-title p { color: hsl(var(--muted-foreground)); line-height: 1.55; max-width: 760px; margin: 8px 0 0; font-size: 14.5px; }
+    .panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .panel { border: 1px solid hsl(var(--border)); border-radius: 12px; padding: 16px; background: hsl(var(--card)); }
+    .panel h3 { margin: 0 0 12px; color: hsl(var(--primary)); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+    .field { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 12px; padding: 10px 0; border-top: 1px solid hsl(var(--border)); }
+    .field:first-of-type { border-top: 0; }
+    .field span:first-child { color: hsl(var(--muted-foreground)); font-size: 12.5px; }
+    .field span:last-child { font-weight: 600; overflow-wrap: anywhere; font-size: 13.5px; }
+    .stage-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0 0 18px; }
+    .stage { border: 1px solid hsl(var(--border)); border-radius: 10px; padding: 13px; background: hsl(var(--secondary) / .45); }
+    .stage b { display: block; margin-bottom: 6px; font-size: 13px; }
+    .stage small { color: hsl(var(--muted-foreground)); line-height: 1.4; font-size: 12px; }
+    .checks { display: grid; gap: 10px; }
+    .check { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 1px solid hsl(var(--border)); border-radius: 10px; padding: 13px; background: hsl(var(--card)); }
+    .light { width: 10px; height: 10px; border-radius: 50%; background: hsl(var(--muted-foreground)); }
+    .light.good { background: hsl(var(--accent)); }
+    .light.warn { background: hsl(var(--warning)); }
+    .light.bad { background: hsl(var(--destructive)); }
+    .check b { display: block; font-size: 14px; }
+    .check small { color: hsl(var(--muted-foreground)); display: block; margin-top: 3px; line-height: 1.4; font-size: 12.5px; }
+    .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .route { border: 1px solid hsl(var(--border)); border-radius: 12px; padding: 18px; background: hsl(var(--card)); min-height: 170px; }
+    .route.selected { border-color: hsl(var(--accent) / .55); background: hsl(var(--accent) / .08); }
+    .route.blocked { border-color: hsl(var(--destructive) / .5); background: hsl(var(--destructive) / .06); }
+    .route.warned { border-color: hsl(var(--warning) / .5); background: hsl(var(--warning) / .09); }
+    .route h3 { margin: 10px 0; font-size: 18px; font-weight: 600; }
+    .route p { color: hsl(var(--muted-foreground)); line-height: 1.5; margin: 0; font-size: 14px; }
+    .note { border: 1px solid hsl(var(--primary) / .25); border-radius: 10px; padding: 14px; background: hsl(var(--primary) / .06); color: hsl(var(--foreground)); line-height: 1.55; font-size: 14px; }
+    .note b { color: hsl(var(--foreground)); }
+    .ledger { display: grid; gap: 10px; counter-reset: ledger; }
+    .event { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid hsl(var(--border)); border-radius: 10px; background: hsl(var(--card)); }
+    .event::before { counter-increment: ledger; content: counter(ledger); width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; background: hsl(var(--primary) / .12); color: hsl(var(--primary)); font-weight: 700; font-size: 13px; }
+    .event b { font-size: 14px; }
+    .event small { color: hsl(var(--muted-foreground)); line-height: 1.4; font-size: 12.5px; }
+    /* Dark-navy evidence panel: brand-sanctioned for evidence/protocol surfaces. */
+    .evidence-box { margin-top: 14px; border: 1px solid hsl(var(--sidebar-border)); border-radius: 12px; background: hsl(var(--sidebar)); overflow: hidden; }
+    .evidence-box pre { margin: 0; padding: 16px; color: hsl(210 25% 88%); overflow: auto; max-height: 300px; font-size: 12px; line-height: 1.5; }
+    .walkthrough-panel { border-color: hsl(var(--primary) / .32); background: linear-gradient(135deg, hsl(var(--primary) / .10), hsl(var(--accent) / .08)); }
+    .walkthrough-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 16px; align-items: start; }
+    .walkthrough-steps { display: grid; gap: 8px; }
+    .walkthrough-step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; align-items: center; padding: 10px; border: 1px solid hsl(var(--border)); border-radius: 10px; background: hsl(var(--card) / .78); color: hsl(var(--muted-foreground)); font-size: 13px; }
+    .walkthrough-step b { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: hsl(var(--secondary)); color: hsl(var(--foreground)); font-size: 12px; }
+    .walkthrough-step.active { border-color: hsl(var(--primary) / .55); color: hsl(var(--foreground)); background: hsl(var(--primary) / .10); }
+    .walkthrough-step.active b { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+    .walkthrough-copy { display: grid; gap: 10px; }
+    .walkthrough-copy h3 { margin: 0; font-size: 18px; letter-spacing: -.01em; }
+    .walkthrough-copy p { margin: 0; color: hsl(var(--muted-foreground)); line-height: 1.55; font-size: 14px; }
+    .receipt-card { margin-top: 14px; border: 1px solid hsl(var(--accent) / .38); border-radius: 12px; padding: 14px; background: hsl(var(--accent) / .08); }
+    .receipt-card h3 { margin: 0 0 10px; color: hsl(var(--success-fg)); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    .receipt-card .field { grid-template-columns: 160px minmax(0, 1fr); }
+    .footer-note { color: hsl(var(--muted-foreground)); text-align: center; font-size: 12px; line-height: 1.45; padding: 16px; }
+    .toast { position: fixed; right: 18px; bottom: 18px; max-width: 360px; padding: 13px 15px; border: 1px solid hsl(var(--card-border)); border-radius: 12px; background: hsl(var(--card)); color: hsl(var(--foreground)); box-shadow: 0 8px 28px hsl(222 47% 11% / .12); opacity: 0; visibility: hidden; transform: translateY(12px); transition: opacity .18s ease, transform .18s ease, visibility 0s linear .18s; z-index: 40; pointer-events: none; font-size: 13.5px; }
+    .toast.show { opacity: 1; visibility: visible; transform: translateY(0); transition: opacity .18s ease, transform .18s ease; }
+
+    @media (max-width: 1060px) {
+      header, .layout { grid-template-columns: 1fr; }
+      .stage-grid, .panels, .decision-grid, .walkthrough-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .workspace { min-height: auto; }
+    }
+    @media (max-width: 760px) {
+      .stage-grid, .panels, .decision-grid, .walkthrough-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      .shell { padding: 16px 14px 28px; }
+      .topbar { align-items: flex-start; }
+      .hero { padding: 22px; }
+      .field { grid-template-columns: 1fr; gap: 4px; }
+      .screen-title { flex-direction: column; align-items: stretch; }
+      .screen-title > .pill { align-self: flex-start; }
+      .check, .event { grid-template-columns: auto minmax(0, 1fr); }
+      .check > .pill, .event > .pill { grid-column: 2; justify-self: start; }
+      .tabs { flex-wrap: wrap; overflow-x: visible; }
+      .tab { flex: 1 1 calc(50% - 8px); text-align: center; justify-content: center; }
+      .select-wrap { width: 100%; flex-direction: column; align-items: flex-start; }
+      select { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="brandline"><span class="dot-mark" aria-hidden="true"></span><span>Public reference demo</span><span class="badge info">browser-only</span><span class="badge warn">synthetic data</span></div>
+      <div class="topbar-right">
+        <span class="mono">Demo build: 2026-07-10-public-reference-v1</span>
+        <button class="theme-toggle" id="themeToggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+          <span class="label-dark">Dark</span><span class="label-light">Light</span>
+        </button>
+      </div>
+    </div>
+
+    <header>
+      <section class="hero">
+        <div class="eyebrow">Settlement Endpoint Control Tower</div>
+        <h1><span class="hl">Identity-bound endpoints</span> before value moves.</h1>
+        <p class="subtitle">A production-shaped, synthetic demo for banks to pre-validate tokenized settlement endpoints beside BIC, LEI/vLEI-style authority, fiat SSI fallback and ISO/UETR-style traceability.</p>
+        <div class="hero-actions">
+          <button class="btn primary" data-action="walkthrough">Start Guided Walkthrough</button>
+          <button class="btn" data-goto="validation">Run pre-validation</button>
+          <button class="btn" data-action="downloadReceipt">Download evidence receipt</button>
+        </div>
+      </section>
+      <aside class="status-card" aria-label="Demo boundary">
+        <h2>Public demo boundary</h2>
+        <p>No real payments, no live payment-network integration, no live wallet ownership check, no live legal-entity or authority verification, and no proprietary reference-data rows. This models the control workflow using synthetic data only.</p>
+        <div class="status-grid">
+          <div class="status-row"><span>Data</span><span class="pill warn">synthetic fixture</span></div>
+          <div class="status-row"><span>Runtime</span><span class="pill info">static browser app</span></div>
+          <div class="status-row"><span>Network calls</span><span class="pill good">none</span></div>
+          <div class="status-row"><span>Public posture</span><span class="pill good">claim-safe</span></div>
+        </div>
+      </aside>
+    </header>
+
+    <main>
+      <nav class="control-strip" aria-label="Demo controls">
+        <div class="tabs" role="tablist" aria-label="Demo screens">
+          <button class="tab" role="tab" data-screen="profile" aria-selected="true">1. endpoint profile</button>
+          <button class="tab" role="tab" data-screen="validation" aria-selected="false">2. pre-validation</button>
+          <button class="tab" role="tab" data-screen="decision" aria-selected="false">3. route decision</button>
+          <button class="tab" role="tab" data-screen="audit" aria-selected="false">4. evidence and audit</button>
+        </div>
+        <div class="controls">
+          <label class="select-wrap">Scenario
+            <select id="scenarioSelect" aria-label="Scenario">
+              <option value="blocked">Blocked wallet endpoint</option>
+              <option value="refreshed">Refreshed endpoint approved</option>
+              <option value="authority">Authority evidence expired</option>
+            </select>
+          </label>
+          <label class="select-wrap">Role
+            <select id="roleSelect" aria-label="Role">
+              <option value="operator">Ops analyst</option>
+              <option value="risk">Risk reviewer</option>
+              <option value="approver">Four-eyes approver</option>
+            </select>
+          </label>
+          <button class="btn" data-action="reset">Reset</button>
+        </div>
+      </nav>
+
+      <section class="card walkthrough-panel" aria-label="Guided walkthrough">
+        <div class="card-head"><h2>Guided walkthrough</h2><span id="walkthroughBadge" class="pill info">step 1 of 4</span></div>
+        <div class="card-body walkthrough-grid">
+          <div class="walkthrough-steps" id="walkthroughSteps" aria-label="Guided walkthrough steps"></div>
+          <div class="walkthrough-copy">
+            <h3 id="walkthroughTitle">Beneficiary endpoint profile</h3>
+            <p id="walkthroughNarration">Start here: the beneficiary has a valid fiat SSI, but the tokenized settlement endpoint needs identity-bound control evidence before value moves.</p>
+            <div class="hero-actions">
+              <button class="btn primary" data-action="walkthrough">Start Guided Walkthrough</button>
+              <button class="btn" data-action="nextGuided">Next walkthrough step</button>
+              <button class="btn" data-action="downloadReceipt">Download evidence receipt</button>
+            </div>
+            <div class="receipt-card" aria-label="Evidence receipt summary">
+              <h3>Evidence Receipt</h3>
+              <div class="field"><span>Receipt ID</span><span class="mono" id="receiptId">SECT-SYN-2026-000184</span></div>
+              <div class="field"><span>Current verdict</span><span id="receiptVerdict">TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED</span></div>
+              <div class="field"><span>Download</span><span class="mono">settlement-endpoint-evidence.json</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="layout">
+        <aside class="card side-stack" aria-label="Payment context">
+          <div class="card-head"><h2>Payment context</h2><span id="contextPill" class="pill bad">fallback selected</span></div>
+          <div class="card-body kv">
+            <div class="kv-row"><div class="label">Debtor bank</div><div class="value">Atlas Bank Singapore</div><div class="detail mono">ATLASGSGXXX</div></div>
+            <div class="kv-row"><div class="label">Beneficiary entity</div><div class="value">Northstar Components GmbH</div><div class="detail mono">LEI 549300SYNTHETIC01</div></div>
+            <div class="kv-row"><div class="label">Beneficiary institution</div><div class="value">Meridian Bank Europe</div><div class="detail mono">MERIDEFFXXX</div></div>
+            <div class="kv-row"><div class="label">Requested rail</div><div class="value">Tokenized deposit</div><div class="detail">Permissioned network. Custody and endpoint-control checks required.</div></div>
+            <div class="kv-row"><div class="label">Fallback rail</div><div class="value">Fiat SSI route available</div><div class="detail mono">EUR · DE•• •••• •••• 4400 · UETR SYN-2026-000184</div></div>
+            <div class="note"><b>Demo point:</b> the beneficiary is not invalid. The fiat SSI is usable. The digital endpoint may still be unsafe for tokenized settlement until fresh endpoint evidence exists.</div>
+          </div>
+        </aside>
+
+        <section class="card workspace" aria-live="polite">
+          <div class="card-body">
+            <section id="view-profile" class="view active">
+              <div class="screen-title"><div><h2>Counterparty settlement endpoint profile</h2><p>One operations surface joins the traditional settlement identity layer with the digital endpoint layer.</p></div><span id="profileBadge" class="pill warn">pre-release</span></div>
+              <div class="stage-grid">
+                <div class="stage"><b>1. Source</b><small>Institution, entity, endpoint and fallback SSI profile loaded.</small></div>
+                <div class="stage"><b>2. Controls</b><small>Freshness, authority, custody, Travel Rule and rail policy checks.</small></div>
+                <div class="stage"><b>3. Decision</b><small>Approve token rail, select fallback or hold for remediation.</small></div>
+                <div class="stage"><b>4. Evidence</b><small>Exportable audit trail for guided walkthrough and ops review.</small></div>
+              </div>
+              <div class="panels">
+                <div class="panel"><h3>Institution layer</h3><div class="field"><span>BIC</span><span class="mono">MERIDEFFXXX</span></div><div class="field"><span>Role</span><span>Creditor agent and fallback SSI holder</span></div><div class="field"><span>Reachability</span><span>Synthetic institution-reachability evidence</span></div><div class="field"><span>Jurisdiction</span><span>EU synthetic profile</span></div></div>
+                <div class="panel"><h3>Legal entity layer</h3><div class="field"><span>LEI</span><span class="mono">549300SYNTHETIC01</span></div><div class="field"><span>Entity</span><span>Northstar Components GmbH</span></div><div class="field"><span>Authority</span><span id="authorityField">vLEI-style evidence expiring soon</span></div><div class="field"><span>Maintainer</span><span>Four-eyes treasury operations</span></div></div>
+                <div class="panel"><h3>Digital endpoint</h3><div class="field"><span>Wallet</span><span class="mono">0x71...9F4A</span></div><div class="field"><span>Custody</span><span id="custodyField">Approved custodian, evidence required</span></div><div class="field"><span>Allowlist</span><span id="allowlistField">Stale, refresh required</span></div><div class="field"><span>Endpoint owner</span><span id="ownerField">Treasury ops queue</span></div></div>
+                <div class="panel"><h3>Fiat fallback SSI</h3><div class="field"><span>Currency</span><span>EUR</span></div><div class="field"><span>Account</span><span class="mono">DE•• •••• •••• 4400</span></div><div class="field"><span>Intermediary</span><span class="mono">INTERDEFFXXX</span></div><div class="field"><span>Status</span><span>Approved fallback route</span></div></div>
+              </div>
+            </section>
+
+            <section id="view-validation" class="view">
+              <div class="screen-title"><div><h2>Endpoint pre-validation</h2><p>Checks run before release. The product validates route readiness, not just field syntax.</p></div><span id="validationBadge" class="pill bad">blocked</span></div>
+              <div class="checks" id="checkList"></div>
+              <div class="note" id="roleNote" style="margin-top:14px"></div>
+            </section>
+
+            <section id="view-decision" class="view">
+              <div class="screen-title"><div><h2>Policy route decision</h2><p>The control tower gives operations an auditable route verdict and repair path.</p></div><span id="decisionBadge" class="pill bad">fallback selected</span></div>
+              <div class="decision-grid">
+                <article id="tokenRoute" class="route blocked"><span class="pill info">requested rail</span><h3>Tokenized deposit route</h3><p id="tokenRouteText">Blocked pending endpoint repair.</p></article>
+                <article id="fiatRoute" class="route selected"><span class="pill info">fallback rail</span><h3>Fiat SSI fallback</h3><p id="fiatRouteText">Selected while endpoint evidence is repaired.</p></article>
+              </div>
+              <div class="note" id="repairText" style="margin-top:14px"></div>
+            </section>
+
+            <section id="view-audit" class="view">
+              <div class="screen-title"><div><h2>Evidence and audit pack</h2><p>Audit-ready trace showing profile source, failed or passed controls, route decision and next operator action.</p></div><span class="pill good mono">UETR SYN-2026-000184</span></div>
+              <div class="ledger" id="auditList"></div>
+              <div class="hero-actions">
+                <button class="btn primary" data-action="downloadReceipt">Download evidence receipt</button>
+                <button class="btn" data-action="download">Download synthetic evidence JSON</button>
+                <button class="btn" data-action="copy">Copy UETR</button>
+              </div>
+              <div class="evidence-box"><pre id="evidenceJson"></pre></div>
+            </section>
+          </div>
+        </section>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h3>Public-safe wording</h3><span class="pill good">claim-safe</span></div>
+        <div class="card-body note">Settlement Endpoint Control Tower is a synthetic reference demo. It shows how banks could pre-validate identity-bound wallet endpoints beside BIC, LEI/vLEI-style authority, fiat SSI fallback and ISO/UETR-style visibility. It does not claim live payment execution, live payment-network integration, live legal-entity or authority verification, live wallet ownership verification or production compliance.</div>
+      </section>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const appState = { screen: 'profile', scenario: 'blocked', role: 'operator', timer: null, walkthroughStep: 0 };
+    const screens = ['profile', 'validation', 'decision', 'audit'];
+    const walkthroughSteps = [
+      { screen: 'profile', title: 'Beneficiary endpoint profile', narration: 'The beneficiary has a valid fiat SSI and known institution/entity identity. The risk is the requested token endpoint, not the counterparty itself.' },
+      { screen: 'validation', title: 'Validation result', narration: 'The control tower checks freshness, authority, custody, endpoint-control payload and fallback route before value moves.' },
+      { screen: 'decision', title: 'Block or fallback decision', narration: 'If digital endpoint evidence is stale or incomplete, the token route is blocked while the fiat SSI fallback remains available.' },
+      { screen: 'audit', title: 'Evidence receipt and audit trail', narration: 'The reviewer gets a downloadable synthetic evidence receipt with verdict, checks, audit events and explicit non-claims.' }
+    ];
+    const roleNotes = {
+      operator: 'Ops analyst view: decide whether to release the token route now, use fallback, or open repair.',
+      risk: 'Risk reviewer view: checks are evidence-oriented and explain why a rail is blocked or eligible.',
+      approver: 'Four-eyes approver view: approval should happen only after the exception is resolved and audit evidence is visible.'
+    };
+    const scenarios = {
+      blocked: {
+        context: ['bad', 'fallback selected'], profile: ['warn', 'pre-release'], validation: ['bad', 'blocked'], decision: ['bad', 'fallback selected'],
+        authority: 'vLEI-style evidence expiring soon', allowlist: 'Stale, refresh required', custody: 'Approved custodian, endpoint evidence incomplete', owner: 'Treasury ops queue',
+        checks: [
+          ['good','BIC and institution shape','Institution layer is present and reaches fallback SSI holder.'],
+          ['good','LEI and counterparty profile','Legal entity profile is present for the beneficiary.'],
+          ['warn','vLEI-style authority evidence','Authority evidence expires soon and needs refresh before token use.'],
+          ['bad','Wallet allowlist freshness','Allowlist is stale for the requested counterparty and rail.'],
+          ['bad','Endpoint-control payload','Beneficiary wallet-control field is incomplete.'],
+          ['good','Fiat SSI fallback','Fallback route is available and traceable.']
+        ],
+        tokenClass: 'blocked', fiatClass: 'selected', tokenText: 'Blocked. Wallet allowlist is stale and endpoint-control evidence is incomplete.', fiatText: 'Selected now. The fiat route remains approved and traceable while the digital endpoint is repaired.', repair: 'Repair task: refresh wallet allowlist and endpoint authority evidence before using the tokenized route.', verdict: 'TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED',
+        audit: [
+          ['Profile loaded','BIC, LEI/vLEI-style authority, wallet endpoint and fallback SSI loaded.','logged'],
+          ['Pre-validation started','Tokenized deposit route checked before release.','logged'],
+          ['Wallet allowlist failed','Allowlist evidence is stale for requested rail.','exception'],
+          ['Endpoint-control failed','Required synthetic endpoint-control field is incomplete.','exception'],
+          ['Policy decision','Token route blocked. Fiat SSI fallback selected.','decision'],
+          ['Repair task opened','Treasury operations must refresh endpoint evidence.','action']
+        ]
+      },
+      refreshed: {
+        context: ['good', 'token route eligible'], profile: ['good', 'ready'], validation: ['good', 'eligible'], decision: ['good', 'token route approved'],
+        authority: 'vLEI-style evidence refreshed', allowlist: 'Current for counterparty and rail', custody: 'Approved custodian, current evidence attached', owner: 'Treasury ops approved',
+        checks: [
+          ['good','BIC and institution shape','Institution layer is present and reaches fallback SSI holder.'],
+          ['good','LEI and counterparty profile','Legal entity profile is present for the beneficiary.'],
+          ['good','vLEI-style authority evidence','Synthetic authority evidence is refreshed.'],
+          ['good','Wallet allowlist freshness','Allowlist is current for this counterparty and rail.'],
+          ['good','Endpoint-control payload','Required synthetic payload is complete.'],
+          ['good','Fiat SSI fallback','Fallback remains available as operational backup.']
+        ],
+        tokenClass: 'selected', fiatClass: '', tokenText: 'Approved. Wallet allowlist, authority evidence and endpoint-control payload are current.', fiatText: 'Retained as fallback. No immediate route switch required.', repair: 'Repair task closed: endpoint evidence is current. Continue monitoring freshness before future releases.', verdict: 'TOKEN_ROUTE_APPROVED_FIAT_FALLBACK_RETAINED',
+        audit: [
+          ['Profile loaded','BIC, LEI/vLEI-style authority, wallet endpoint and fallback SSI loaded.','logged'],
+          ['Pre-validation started','Tokenized deposit route checked before release.','logged'],
+          ['Endpoint evidence passed','Wallet allowlist and authority evidence are current.','logged'],
+          ['Endpoint-control passed','Required synthetic endpoint payload is complete.','logged'],
+          ['Policy decision','Tokenized deposit route approved.','decision'],
+          ['Fallback retained','Fiat SSI remains visible as contingency route.','logged']
+        ]
+      },
+      authority: {
+        context: ['warn', 'approval hold'], profile: ['warn', 'authority expired'], validation: ['warn', 'hold'], decision: ['warn', 'manual approval hold'],
+        authority: 'vLEI-style evidence expired in fixture', allowlist: 'Current but authority chain stale', custody: 'Approved custodian, approval hold active', owner: 'Risk reviewer queue',
+        checks: [
+          ['good','BIC and institution shape','Institution layer is present and reaches fallback SSI holder.'],
+          ['good','LEI and counterparty profile','Legal entity profile is present for the beneficiary.'],
+          ['bad','vLEI-style authority evidence','Authority evidence is expired in this synthetic scenario.'],
+          ['good','Wallet allowlist freshness','Allowlist is current for the requested endpoint.'],
+          ['warn','Endpoint-control payload','Payload complete, but authority chain blocks release.'],
+          ['good','Fiat SSI fallback','Fallback route is available and traceable.']
+        ],
+        tokenClass: 'warned', fiatClass: 'selected', tokenText: 'Hold. Endpoint allowlist is current, but authority evidence is expired and requires risk review.', fiatText: 'Selected if settlement must proceed before authority repair.', repair: 'Repair task: renew authority evidence or route through fallback with manual approval.', verdict: 'AUTHORITY_EXPIRED_MANUAL_HOLD',
+        audit: [
+          ['Profile loaded','BIC, LEI/vLEI-style authority, wallet endpoint and fallback SSI loaded.','logged'],
+          ['Pre-validation started','Authority chain and endpoint controls checked.','logged'],
+          ['Authority evidence failed','Synthetic authority evidence is expired.','exception'],
+          ['Allowlist passed','Wallet endpoint allowlist is current.','logged'],
+          ['Policy decision','Manual approval hold. Fiat fallback available.','decision'],
+          ['Risk task opened','Risk reviewer must renew or override using approved workflow.','action']
+        ]
+      }
+    };
+    function $(id) { return document.getElementById(id); }
+    function setPill(el, spec) { el.className = `pill ${spec[0]}`; el.textContent = spec[1]; }
+    function showToast(text) { const t = $('toast'); t.textContent = text; t.classList.add('show'); window.clearTimeout(t._timer); t._timer = window.setTimeout(() => t.classList.remove('show'), 2100); }
+    function setTheme(theme) {
+      document.documentElement.classList.toggle('dark', theme === 'dark');
+      try { localStorage.setItem('theme', theme); } catch (e) { /* storage unavailable */ }
+    }
+    function setScreen(screen) {
+      appState.screen = screen;
+      const matchingStep = walkthroughSteps.findIndex(step => step.screen === screen);
+      if (matchingStep >= 0) appState.walkthroughStep = matchingStep;
+      document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+      $(`view-${screen}`).classList.add('active');
+      document.querySelectorAll('.tab').forEach(btn => {
+        const selected = btn.dataset.screen === screen;
+        btn.setAttribute('aria-selected', selected ? 'true' : 'false');
+        if (selected) btn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      });
+    }
+    function evidenceBundle(s) {
+      return {
+        demo: 'Settlement Endpoint Control Tower',
+        build: '2026-07-10-public-reference-v1',
+        boundary: 'synthetic_data_only_no_external_network_calls',
+        payment_context: { debtor_bic: 'ATLASGSGXXX', creditor_bic: 'MERIDEFFXXX', beneficiary_lei: '549300SYNTHETIC01', uetr: 'SYN-2026-000184', requested_rail: 'tokenized_deposit', fallback_rail: 'fiat_ssi' },
+        scenario: appState.scenario,
+        role: appState.role,
+        verdict: s.verdict,
+        checks: s.checks.map(([status, name, detail]) => ({ status, name, detail })),
+        audit: s.audit.map(([event, detail, type], index) => ({ seq: index + 1, event, detail, type }))
+      };
+    }
+    function evidenceReceipt(s) {
+      return {
+        receipt_type: 'settlement_endpoint_control_tower_synthetic_evidence_receipt',
+        receipt_id: 'SECT-SYN-2026-000184',
+        distribution: 'self_contained_static_demo',
+        build: '2026-07-10-public-reference-v1',
+        boundary: {
+          data: 'synthetic fixture only',
+          runtime: 'static browser app',
+          network_calls: 'none',
+          non_claims: ['no real payments', 'no live payment-network integration', 'no live wallet ownership check', 'no live legal-entity or authority verification', 'no proprietary reference-data rows', 'no production compliance claim']
+        },
+        guided_walkthrough: walkthroughSteps.map((step, index) => ({ step: index + 1, title: step.title, screen: step.screen, narration: step.narration })),
+        payment_context: { debtor_bic: 'ATLASGSGXXX', creditor_bic: 'MERIDEFFXXX', beneficiary_lei: '549300SYNTHETIC01', uetr: 'SYN-2026-000184', requested_rail: 'tokenized_deposit', fallback_rail: 'fiat_ssi' },
+        scenario: appState.scenario,
+        role: appState.role,
+        verdict: s.verdict,
+        decision_summary: s.repair,
+        checks: s.checks.map(([status, name, detail]) => ({ status, name, detail })),
+        audit: s.audit.map(([event, detail, type], index) => ({ seq: index + 1, event, detail, type }))
+      };
+    }
+    function renderChecks(s) {
+      $('checkList').innerHTML = s.checks.map(([kind,title,detail]) => `<article class="check"><span class="light ${kind}" aria-hidden="true"></span><span><b>${title}</b><small>${detail}</small></span><span class="pill ${kind}">${kind === 'bad' ? 'fail' : kind === 'warn' ? 'watch' : 'pass'}</span></article>`).join('');
+    }
+    function renderAudit(s) {
+      $('auditList').innerHTML = s.audit.map(([title,detail,type]) => {
+        const kind = type === 'exception' ? 'bad' : type === 'decision' ? 'warn' : type === 'action' ? 'info' : 'good';
+        return `<article class="event"><span><b>${title}</b><br><small>${detail}</small></span><span class="pill ${kind}">${type}</span></article>`;
+      }).join('');
+      $('evidenceJson').textContent = JSON.stringify(evidenceBundle(s), null, 2);
+    }
+    function renderGuided(s) {
+      const current = walkthroughSteps[appState.walkthroughStep];
+      $('walkthroughBadge').textContent = `step ${appState.walkthroughStep + 1} of ${walkthroughSteps.length}`;
+      $('walkthroughTitle').textContent = current.title;
+      $('walkthroughNarration').textContent = current.narration;
+      $('receiptVerdict').textContent = s.verdict;
+      $('walkthroughSteps').innerHTML = walkthroughSteps.map((step, index) => `<div class="walkthrough-step ${index === appState.walkthroughStep ? 'active' : ''}"><b>${index + 1}</b><span>${step.title}</span></div>`).join('');
+    }
+    function render() {
+      const s = scenarios[appState.scenario];
+      $('scenarioSelect').value = appState.scenario;
+      $('roleSelect').value = appState.role;
+      setPill($('contextPill'), s.context);
+      setPill($('profileBadge'), s.profile);
+      setPill($('validationBadge'), s.validation);
+      setPill($('decisionBadge'), s.decision);
+      $('authorityField').textContent = s.authority;
+      $('allowlistField').textContent = s.allowlist;
+      $('custodyField').textContent = s.custody;
+      $('ownerField').textContent = s.owner;
+      $('roleNote').innerHTML = `<b>${roleNotes[appState.role].split(':')[0]}:</b>${roleNotes[appState.role].split(':').slice(1).join(':')}`;
+      $('tokenRoute').className = `route ${s.tokenClass}`;
+      $('fiatRoute').className = `route ${s.fiatClass}`;
+      $('tokenRouteText').textContent = s.tokenText;
+      $('fiatRouteText').textContent = s.fiatText;
+      $('repairText').textContent = s.repair;
+      renderChecks(s);
+      renderAudit(s);
+      renderGuided(s);
+    }
+    function showGuidedStep(index, announce) {
+      appState.walkthroughStep = index % walkthroughSteps.length;
+      const step = walkthroughSteps[appState.walkthroughStep];
+      setScreen(step.screen);
+      render();
+      if (announce) showToast(`Guided walkthrough: ${step.title}`);
+    }
+    function startGuidedMode() {
+      window.clearTimeout(appState.timer);
+      showGuidedStep(0, true);
+    }
+    function nextGuidedStep() {
+      window.clearTimeout(appState.timer);
+      showGuidedStep((appState.walkthroughStep + 1) % walkthroughSteps.length, true);
+    }
+    function play() {
+      window.clearTimeout(appState.timer);
+      appState.walkthroughStep = 0;
+      showGuidedStep(0, false);
+      showToast('Guided walkthrough started');
+      function next() {
+        if (appState.walkthroughStep < walkthroughSteps.length - 1) {
+          showGuidedStep(appState.walkthroughStep + 1, false);
+          appState.timer = window.setTimeout(next, 1050);
+        } else {
+          showToast('Evidence receipt ready');
+        }
+      }
+      appState.timer = window.setTimeout(next, 1050);
+    }
+    function reset() { window.clearTimeout(appState.timer); appState.scenario = 'blocked'; appState.role = 'operator'; appState.walkthroughStep = 0; setScreen('profile'); render(); showToast('Demo reset to blocked endpoint scenario'); }
+    function saveJson(payload, filename, message) {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); showToast(message);
+    }
+    function downloadEvidence() {
+      saveJson(evidenceBundle(scenarios[appState.scenario]), `settlement-endpoint-evidence-${appState.scenario}.json`, 'Synthetic evidence JSON prepared');
+    }
+    function downloadReceipt() {
+      saveJson(evidenceReceipt(scenarios[appState.scenario]), 'settlement-endpoint-evidence.json', 'Evidence receipt prepared');
+    }
+    function copyUetr() { navigator.clipboard && navigator.clipboard.writeText('SYN-2026-000184').then(() => showToast('UETR copied')).catch(() => showToast('UETR: SYN-2026-000184')); }
+    document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => { setScreen(btn.dataset.screen); render(); }));
+    document.querySelectorAll('[data-goto]').forEach(btn => btn.addEventListener('click', () => { setScreen(btn.dataset.goto); render(); }));
+    document.querySelectorAll('[data-action]').forEach(btn => btn.addEventListener('click', () => {
+      const actions = { play, walkthrough: startGuidedMode, nextGuided: nextGuidedStep, reset, download: downloadEvidence, downloadReceipt, copy: copyUetr };
+      actions[btn.dataset.action]();
+    }))
+    $('themeToggle').addEventListener('click', () => setTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark'));
+    $('scenarioSelect').addEventListener('change', e => { appState.scenario = e.target.value; render(); showToast(`Scenario: ${e.target.options[e.target.selectedIndex].text}`); });
+    $('roleSelect').addEventListener('change', e => { appState.role = e.target.value; render(); showToast(`Role: ${e.target.options[e.target.selectedIndex].text}`); });
+    window.__settlementDemo = { appState, scenarios, walkthroughSteps, setScreen, render, evidenceBundle, evidenceReceipt, startGuidedMode, nextGuidedStep, reset, setTheme };
+    render();
+  </script>
+</body>
+</html>

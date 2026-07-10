@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+  <title>Settlement Endpoint Control Tower · DB-backed Stage 2</title>
+  <style>
+    :root { color-scheme: dark; --bg:#070a11; --panel:#101724; --line:rgba(255,255,255,.14); --ink:#f6f8fc; --muted:#a2aec3; --blue:#66d4ff; --green:#6cf0a8; --amber:#ffd166; --red:#ff7080; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at 10% 8%, rgba(102,212,255,.22), transparent 28rem), linear-gradient(180deg,#070a11,#0b111c); color:var(--ink); }
+    .shell { max-width:1180px; margin:0 auto; padding:24px; }
+    .top { display:flex; justify-content:space-between; gap:12px; align-items:center; color:var(--muted); font-size:13px; margin-bottom:18px; flex-wrap:wrap; }
+    .badge, .pill { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:7px 10px; color:var(--muted); background:rgba(255,255,255,.04); font-size:12px; }
+    .good { color:var(--green); border-color:rgba(108,240,168,.42); background:rgba(108,240,168,.08); }
+    .warn { color:var(--amber); border-color:rgba(255,209,102,.42); background:rgba(255,209,102,.08); }
+    .bad { color:var(--red); border-color:rgba(255,112,128,.44); background:rgba(255,112,128,.08); }
+    .info { color:var(--blue); border-color:rgba(102,212,255,.42); background:rgba(102,212,255,.08); }
+    header, .card { border:1px solid var(--line); border-radius:24px; background:rgba(16,23,36,.86); box-shadow:0 28px 80px rgba(0,0,0,.35); }
+    header { padding:28px; display:grid; gap:14px; }
+    h1 { margin:0; max-width:840px; font-size:clamp(38px,7vw,80px); line-height:.9; letter-spacing:-.06em; }
+    p { color:var(--muted); line-height:1.55; }
+    main { display:grid; grid-template-columns:310px 1fr; gap:18px; margin-top:18px; align-items:start; }
+    .card { overflow:hidden; }
+    .head { padding:16px 18px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    .body { padding:18px; }
+    label { display:grid; gap:8px; color:var(--muted); font-size:13px; }
+    select, button { font:inherit; min-height:44px; border-radius:999px; border:1px solid var(--line); background:rgba(255,255,255,.06); color:var(--ink); padding:0 13px; }
+    button { cursor:pointer; }
+    .kv { display:grid; gap:10px; }
+    .row { border:1px solid rgba(255,255,255,.10); border-radius:16px; padding:12px; background:rgba(255,255,255,.03); }
+    .row small { display:block; color:var(--muted); margin-bottom:5px; text-transform:uppercase; letter-spacing:.08em; font-size:11px; }
+    .mono { font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .check, .event, .route, .lineage { border:1px solid var(--line); border-radius:16px; padding:13px; background:rgba(255,255,255,.03); }
+    .check { display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center; }
+    .stack { display:grid; gap:12px; }
+    .actionbar { display:grid; gap:10px; }
+    .actionbar button { width:100%; }
+    pre { white-space:pre-wrap; color:#d8e6f7; overflow:auto; max-height:360px; margin:0; }
+    @media (max-width:840px) { main, .grid { grid-template-columns:1fr; } .shell { padding:16px; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top"><span>Settlement Endpoint Control Tower</span><span class="badge info">SQLite-backed localhost scaffold</span><span class="badge info">reference manifest</span><span class="badge warn">synthetic fixture</span></div>
+    <header>
+      <span class="badge info">Settlement Endpoint Control Tower · Stage 2</span>
+      <h1>Scenario data loaded from SQLite, with visible source lineage.</h1>
+      <p>This localhost-only scaffold preserves the static rollback in <span class="mono">demo/index.html</span> and demonstrates the Stage 2 shape: schema, deterministic seed, health check, scenario API, audit counts, and public reference descriptors with no imported source rows.</p>
+      <div><span id="health" class="pill warn">checking database…</span></div>
+    </header>
+
+    <main>
+      <aside class="card">
+        <div class="head"><strong>Controls</strong><span class="pill warn">no external calls</span></div>
+        <div class="body stack">
+          <label>Scenario <select id="scenarioSelect"></select></label>
+          <button id="reload">Reload from DB API</button>
+          <div class="actionbar">
+            <button id="openRepair">Persist repair task</button>
+            <button id="approveFallback">Approve fiat fallback</button>
+            <button id="downloadEvidence">Download DB evidence JSON</button>
+          </div>
+          <div class="kv" id="context"></div>
+        </div>
+      </aside>
+
+      <section class="card">
+        <div class="head"><strong id="title">Loading…</strong><span id="decisionPill" class="pill warn">pending</span></div>
+        <div class="body stack">
+          <div class="grid">
+            <section class="row"><small>Beneficiary entity</small><div id="entity"></div></section>
+            <section class="row"><small>Endpoint</small><div id="endpoint"></div></section>
+          </div>
+          <section><h2>Pre-validation checks</h2><div class="stack" id="checks"></div></section>
+          <section class="grid">
+            <article class="route"><h3>Tokenized deposit route</h3><p id="tokenRoute"></p></article>
+            <article class="route"><h3>Fiat SSI fallback</h3><p id="fiatRoute"></p></article>
+          </section>
+          <section><h2>Audit events</h2><div class="stack" id="audit"></div></section>
+          <section><h2>Persisted operator actions</h2><div class="stack" id="operatorActions"></div></section>
+          <section><h2>Source lineage & demo depth</h2><div class="stack" id="lineage"></div><p id="sourceDisclosure"></p></section>
+          <section class="row"><small>Scenario API payload</small><pre id="payload"></pre></section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const classFor = value => value === 'bad' ? 'bad' : value === 'warn' ? 'warn' : 'good';
+    const fmt = value => Number(value).toLocaleString('en-US');
+
+    async function json(path) {
+      const res = await fetch(path, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+      return res.json();
+    }
+
+    async function postJSON(path, payload) {
+      const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+      return res.json();
+    }
+
+    async function init() {
+      const ready = await json('/readyz');
+      $('health').className = 'pill good';
+      $('health').textContent = `DB ${ready.database} · scenarios ${ready.scenario_count} · references ${ready.source_file_count} · imported rows ${fmt(ready.source_row_estimate)}`;
+      const list = await json('/api/scenarios');
+      $('scenarioSelect').innerHTML = list.scenarios.map(s => `<option value="${s.slug}">${s.title}</option>`).join('');
+      await loadScenario($('scenarioSelect').value);
+    }
+
+    async function loadScenario(slug) {
+      const data = await json(`/api/scenarios/${slug}`);
+      const s = data.scenario;
+      const endpoint = data.payment_context.settlement_endpoint;
+      const entity = data.payment_context.beneficiary_entity;
+      const creditor = data.payment_context.beneficiary_institution;
+      $('title').textContent = s.title;
+      $('decisionPill').className = `pill ${s.decision_class}`;
+      $('decisionPill').textContent = s.decision_label;
+      $('context').innerHTML = [
+        ['State', s.state], ['Creditor BIC', creditor.bic], ['UETR', endpoint.uetr], ['Requested rail', endpoint.requested_rail], ['Fallback', `${endpoint.fallback_currency} · ${endpoint.fallback_account_mask}`]
+      ].map(([k,v]) => `<div class="row"><small>${k}</small><div class="mono">${v}</div></div>`).join('');
+      $('entity').innerHTML = `<strong>${entity.name}</strong><br><span class="mono">LEI ${entity.lei}</span><p>${s.authority_display}</p>`;
+      $('endpoint').innerHTML = `<strong class="mono">${endpoint.wallet_address}</strong><p>${s.custody_display}<br>${s.allowlist_display}<br>${s.owner_display}</p>`;
+      $('checks').innerHTML = data.checks.map(c => `<article class="check"><span><strong>${c.name}</strong><br><small>${c.detail}</small></span><span class="pill ${classFor(c.status)}">${c.status === 'bad' ? 'fail' : c.status === 'warn' ? 'watch' : 'pass'}</span></article>`).join('');
+      $('tokenRoute').textContent = data.decision.token_text;
+      $('fiatRoute').textContent = data.decision.fiat_text;
+      $('audit').innerHTML = data.audit_events.map(e => `<article class="event"><strong>${e.display_order}. ${e.title}</strong><br><small>${e.detail}</small> <span class="pill ${e.event_type === 'exception' ? 'bad' : e.event_type === 'decision' ? 'warn' : 'info'}">${e.event_type}</span></article>`).join('');
+      $('operatorActions').innerHTML = data.operator_actions.length
+        ? data.operator_actions.map(a => `<article class="event"><strong>${a.action_type}</strong><br><small>${a.detail}</small><br><span class="pill info">${a.status}</span> <span class="mono">${a.created_at}</span></article>`).join('')
+        : '<article class="event"><small>No operator action persisted yet. Use the controls to write one into SQLite, then reload/read back.</small></article>';
+      const summary = data.source_manifest_summary;
+      const lineageItems = [creditor, entity, endpoint].map(item => item.source_lineage);
+      $('lineage').innerHTML = [
+        `<article class="lineage"><strong>Reference manifest</strong><br><small>${summary.source_file_count} public reference descriptors · ${fmt(summary.source_row_estimate)} imported source rows.</small></article>`,
+        ...lineageItems.map(l => `<article class="lineage"><strong>${l.mode}</strong><br><small>${l.disclosure}</small><br><span class="mono">${l.source_ids.join(', ')}</span></article>`)
+      ].join('');
+      $('sourceDisclosure').textContent = summary.display_disclosure;
+      $('payload').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function recordAction(actionType) {
+      const slug = $('scenarioSelect').value;
+      await postJSON(`/api/scenarios/${slug}/actions`, { action_type: actionType, actor: 'demo_operator' });
+      await loadScenario(slug);
+    }
+
+    async function downloadEvidence() {
+      const slug = $('scenarioSelect').value;
+      const data = await json(`/api/evidence/${slug}`);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `settlement-endpoint-evidence-${slug}.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    $('scenarioSelect').addEventListener('change', e => loadScenario(e.target.value));
+    $('reload').addEventListener('click', () => loadScenario($('scenarioSelect').value));
+    $('openRepair').addEventListener('click', () => recordAction('open_repair_task'));
+    $('approveFallback').addEventListener('click', () => recordAction('approve_fallback'));
+    $('downloadEvidence').addEventListener('click', downloadEvidence);
+    init().catch(err => { $('health').className = 'pill bad'; $('health').textContent = err.message; });
+  </script>
+</body>
+</html>

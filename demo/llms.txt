@@ -1,0 +1,21 @@
+# Settlement Endpoint Control Tower
+
+Synthetic reference demo for pre-validating identity-bound settlement endpoints before tokenized or fiat value moves.
+
+## Product model
+
+The control tower combines institution identity, legal-entity authority, wallet and custody context, policy checks, fiat fallback instructions, and ISO 20022/UETR-style evidence into one governed endpoint profile.
+
+## Demo boundary
+
+- Synthetic fixtures only.
+- No real payments.
+- No live identity or authority verification.
+- No live wallet-ownership checks.
+- No live sanctions or chain analytics.
+- No proprietary reference-data rows.
+- No production compliance claim.
+
+## Main artifact
+
+- `/` — self-contained browser demo with no external network calls.

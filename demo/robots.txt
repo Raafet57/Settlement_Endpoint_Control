@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+# Synthetic public reference demo. No private data is hosted here.

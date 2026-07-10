@@ -1,0 +1,45 @@
+{
+  "manifest_version": 2,
+  "generated_at": "2026-07-10T00:00:00Z",
+  "boundary": "Synthetic demo fixtures only. No external source rows, credentials, private data, production data, or live network checks are included.",
+  "lineage_summary": {
+    "source_file_count": 4,
+    "source_row_estimate": 0,
+    "runtime_claim": "The fixture model is informed by public standards and control concepts; no external source rows are imported into this repository.",
+    "display_disclosure": "Reference descriptors identify conceptual inputs only. All displayed institution, entity, wallet, account, and payment values are synthetic."
+  },
+  "sources": [
+    {
+      "source_id": "iso_20022_concepts",
+      "name": "ISO 20022 payment concepts",
+      "classification": "public_standard_reference",
+      "sha256_prefix": "not_applicable",
+      "data_row_estimate": 0,
+      "role": "Payment-message, party, agent, and trace-field concepts."
+    },
+    {
+      "source_id": "iban_structure_concepts",
+      "name": "IBAN structural concepts",
+      "classification": "public_standard_reference",
+      "sha256_prefix": "not_applicable",
+      "data_row_estimate": 0,
+      "role": "Masked fiat fallback and country-format concepts."
+    },
+    {
+      "source_id": "lei_authority_concepts",
+      "name": "Legal-entity and authority concepts",
+      "classification": "public_identity_reference",
+      "sha256_prefix": "not_applicable",
+      "data_row_estimate": 0,
+      "role": "Organization identity and delegated-authority model."
+    },
+    {
+      "source_id": "travel_rule_concepts",
+      "name": "Beneficiary-data and Travel Rule concepts",
+      "classification": "public_policy_reference",
+      "sha256_prefix": "not_applicable",
+      "data_row_estimate": 0,
+      "role": "Originator, beneficiary, and endpoint-context completeness controls."
+    }
+  ]
+}

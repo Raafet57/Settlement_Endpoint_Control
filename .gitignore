@@ -1,0 +1,25 @@
+# Local/runtime artifacts
+.DS_Store
+.env
+.env.*
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+node_modules/
+dist/
+build/
+
+# Generated demo state and verification artifacts
+demo-db/data/
+.artifacts/
+playwright-report/
+test-results/
+*.db
+*.sqlite
+
+# Historical/export media does not belong in the source repository
+*.zip
+*.mp4
+*.wav
