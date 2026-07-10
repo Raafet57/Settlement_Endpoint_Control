@@ -1,0 +1,163 @@
+{
+  "snapshot": {
+    "repository": "Settlement_Endpoint_Control",
+    "branch": "main",
+    "frozen_head": "94986ed3e6670b2db0f9e29bde3b994a68b60b9a",
+    "review_date": "2026-07-10",
+    "tracked_file_count": 22,
+    "baseline_status": "clean, working tree matched HEAD at launch"
+  },
+  "lead": {
+    "model": "claude-fable-5",
+    "effort": "ultracode",
+    "role": "orchestrator and synthesizer",
+    "workflow": "true UltraCode dynamic fanout (lead + two adversarial phases)",
+    "workflow_status": "COMPLETED",
+    "phases": 2,
+    "review_agent_count": 9
+  },
+  "agents": [
+    {"name": "product-thesis-scout", "model": "claude-sonnet-5", "phase": "1-scout", "status": "completed", "self_reported_model": "claude-sonnet-5"},
+    {"name": "demo-ux-scout", "model": "claude-sonnet-5", "phase": "1-scout", "status": "completed", "self_reported_model": "claude-sonnet-5"},
+    {"name": "architecture-scout", "model": "claude-sonnet-5", "phase": "1-scout", "status": "completed", "self_reported_model": "claude-sonnet-5"},
+    {"name": "safety-claims-scout", "model": "claude-sonnet-5", "phase": "1-scout", "status": "completed", "self_reported_model": "claude-sonnet-5"},
+    {"name": "business-gtm-scout", "model": "claude-sonnet-5", "phase": "1-scout", "status": "completed", "self_reported_model": "claude-sonnet-5"},
+    {"name": "productization-roadmap-scout", "model": "claude-sonnet-5", "phase": "1-scout", "status": "completed", "self_reported_model": "claude-sonnet-5"},
+    {"name": "quality-deploy-scout", "model": "claude-sonnet-5", "phase": "1-scout", "status": "completed", "self_reported_model": "claude-sonnet-5"},
+    {"name": "skeptic-verifier", "model": "claude-sonnet-5", "phase": "2-adversarial", "status": "completed", "self_reported_model": "claude-sonnet-5"},
+    {"name": "product-redteam", "model": "claude-sonnet-5", "phase": "2-adversarial", "status": "completed", "self_reported_model": "claude-sonnet-5"}
+  ],
+  "phase_counts": {"scouts": 7, "adversarial": 2, "total_review_agents": 9},
+  "inventory_coverage": {
+    "tracked_files_total": 22,
+    "coverage_statement": "Full tracked-repository coverage. All 22 tracked files were read by the lead and/or scouts; the safety-claims scout and roadmap scout each confirmed full 22-file reads; the skeptic-verifier re-read every cited file:line.",
+    "files": [
+      ".gitattributes", ".gitignore", "AGENTS.md", "CLAUDE.md", "README.md", "SECURITY.md",
+      "demo-db/README.md", "demo-db/app.py", "demo-db/index.html", "demo-db/qa_db_smoke.py",
+      "demo-db/seed.py", "demo-db/smoke.py", "demo-db/source_manifest.json",
+      "demo/README.md", "demo/hosting-checklist.md", "demo/index.html", "demo/llms.txt",
+      "demo/qa_browser_mobile.py", "demo/qa_static_demo.py", "demo/robots.txt",
+      "docs/claim-boundary.md", "docs/product-spine.md"
+    ]
+  },
+  "checks_run": [
+    {"command": "python3 demo/qa_static_demo.py", "result": "STATIC_QA PASS", "detail": "index_bytes=50160"},
+    {"command": "python3 demo-db/smoke.py", "result": "SMOKE PASS", "detail": "seed idempotent; 3 verdicts as expected; operator action persisted; audit appended 6->7; evidence boundary verified"},
+    {"command": "retired_term_scan (case-insensitive, excluding .git)", "result": "PASS", "detail": "term1=0 term2=0 term3=0 term4=0 term5=0 term6=0 across all six retired terms"}
+  ],
+  "verdict": {
+    "decision": "PRODUCTIZE",
+    "qualifier": "conditional, advisory-first",
+    "confidence": "moderate-leaning-low",
+    "biggest_upside": "A specific, non-generic control moment (block/hold an unsafe tokenized endpoint while preserving a valid fiat fallback and emitting evidence) modeled coherently across doc, UI, schema, and evidence export, with test-enforced claim discipline.",
+    "biggest_risk": "No decision logic exists; checks and verdicts are hardcoded fixtures. Around that gap: no CRUD, cosmetic four-eyes, no auth, no tenancy, no tamper-evident audit, no live data. The ~1,150-line shape is easy to copy.",
+    "adversarial_dissent": "product-redteam returned PIVOT (toward observe-only Shape C / advisory) with STOP for Shape A as a live blocking gate as-is; honored via advisory-first sequencing and by making the rule engine the next gate.",
+    "next_move": "Build a deterministic rule evaluator that computes the three existing verdicts from endpoint field values, keeping everything synthetic and localhost."
+  },
+  "selected_shape": {
+    "id": "A",
+    "name": "internal pre-release endpoint control gate",
+    "fit_score": "9/9",
+    "entry_posture": "advisory-mode-first (observe/log, no auto-block) before any enforcement",
+    "rejected": [
+      {"id": "B", "name": "shared cross-counterparty endpoint registry", "fit_score": "5/9", "reason": "two-sided cold-start; no tenancy in schema; sells the currently-disclaimed verified-evidence claim"},
+      {"id": "C", "name": "observe-only audit/policy-simulation layer", "fit_score": "5/9", "reason": "rejected as destination (dilutes namesake block value, same integration lift, audit not tamper-evident) but adopted as the advisory on-ramp for A"}
+    ],
+    "requirements": {
+      "R0": "govern endpoint profiles as first-class multi-instance records",
+      "R1": "pre-release validation checks computed from field state",
+      "R2": "block/hold/approve decision states with explanation",
+      "R3": "fallback preservation/selection",
+      "R4": "append-only tamper-evident evidence/audit",
+      "R5": "enforced four-eyes / authority separation",
+      "R6": "policy configurability per institution",
+      "R7": "integration seams to real data sources",
+      "R8": "deployable, secure, tenant-isolated service"
+    },
+    "fit_matrix": {
+      "A": {"R0": "Y", "R1": "Y", "R2": "Y", "R3": "Y", "R4": "Y", "R5": "Y", "R6": "Y", "R7": "Y", "R8": "Y"},
+      "B": {"R0": "Y", "R1": "N", "R2": "N", "R3": "N", "R4": "Y", "R5": "N", "R6": "Y", "R7": "Y", "R8": "Y"},
+      "C": {"R0": "N", "R1": "Y", "R2": "N", "R3": "N", "R4": "Y", "R5": "N", "R6": "Y", "R7": "Y", "R8": "Y"}
+    }
+  },
+  "findings": [
+    {"id": "F-A", "severity": "P0", "lens": "architecture/thesis", "finding": "No policy/decision engine; checks and verdicts are hardcoded fixtures, never computed", "evidence": ["demo-db/seed.py:172-233", "demo-db/app.py:82-123", "demo/index.html:475-539"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "0-30 rule evaluator"},
+    {"id": "F-B", "severity": "P0", "lens": "roadmap/thesis", "finding": "No endpoint CRUD; one shared endpoint_id=1; status columns literal scenario_driven", "evidence": ["demo-db/seed.py:277-283", "demo-db/seed.py:174", "demo-db/seed.py:194", "demo-db/seed.py:214", "demo-db/seed.py:282", "demo-db/app.py:213-268"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "0-30 CRUD"},
+    {"id": "F-C", "severity": "P0", "lens": "safety/thesis", "finding": "Four-eyes is cosmetic; server never checks actor identity; actor is forgeable client text", "evidence": ["demo/index.html:360-366", "demo/index.html:470-474", "demo/index.html:624", "demo-db/app.py:139-168", "demo-db/app.py:141"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "0-30 four-eyes"},
+    {"id": "F-D", "severity": "P0", "lens": "architecture/quality", "finding": "No authentication on any route; localhost enforced only by a startup SystemExit guard", "evidence": ["demo-db/app.py:246-267", "demo-db/app.py:276-277"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "31-90 auth"},
+    {"id": "F-E", "severity": "P0", "lens": "architecture", "finding": "route_decisions.scenario_id is UNIQUE; schema cannot store decision history/recomputation", "evidence": ["demo-db/seed.py:117"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "0-30 decision history"},
+    {"id": "F-F", "severity": "P1", "lens": "demo-ux/architecture", "finding": "Persisted operator actions never change decision/checks; no UPDATE/DELETE in app.py", "evidence": ["demo-db/app.py:139-168"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "0-30 repair loop"},
+    {"id": "F-G", "severity": "P1", "lens": "safety/quality", "finding": "Stored-injection: unsanitized action_type rendered via unescaped innerHTML; CSP unsafe-inline does not mitigate", "evidence": ["demo-db/app.py:140", "demo-db/app.py:151-153", "demo-db/index.html:135", "demo-db/index.html:6"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "Tier-1 security"},
+    {"id": "F-H", "severity": "P1", "lens": "quality/safety", "finding": "CSRF-reachable write: no Origin/CSRF check; body parsed as JSON regardless of Content-Type (text/plain bypass)", "evidence": ["demo-db/app.py:246-267", "demo-db/app.py:256"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "Tier-1 security"},
+    {"id": "F-I", "severity": "P1", "lens": "architecture/roadmap", "finding": "Audit trail not tamper-evident; append-only only by absence of mutating routes", "evidence": ["demo-db/seed.py:127-136", "demo-db/app.py"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "Later ledger"},
+    {"id": "F-J", "severity": "P1", "lens": "architecture/quality", "finding": "No schema migration; seed destructively deletes and rebuilds the DB every run", "evidence": ["demo-db/seed.py:249-250"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "Later deploy"},
+    {"id": "F-K", "severity": "P1", "lens": "architecture/safety", "finding": "No tenant_id/org scoping anywhere in the schema", "evidence": ["demo-db/seed.py:36-160"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "31-90 tenancy column"},
+    {"id": "F-L", "severity": "P1", "lens": "quality", "finding": "No CI; mandatory verification commands never auto-enforced", "evidence": ["no .github/ directory", "no *.yml or *.yaml in repo"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "31-90 ops"},
+    {"id": "F-M", "severity": "P2", "lens": "demo-ux/thesis", "finding": "Evidence receipt id is scenario-invariant; receipt download uses a fixed filename", "evidence": ["demo/index.html:385", "demo/index.html:575", "demo/index.html:674"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "first-product evidence"},
+    {"id": "F-N", "severity": "P2", "lens": "demo-ux", "finding": "hold_payment action exists server-side but has no UI control", "evidence": ["demo-db/app.py:130-136", "demo-db/index.html:61-62"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "first-product UX"},
+    {"id": "F-O", "severity": "P2", "lens": "safety", "finding": "source_manifest DB table is seeded but never queried; reference-manifest API is file-backed", "evidence": ["demo-db/seed.py:258-264", "demo-db/app.py:36-42", "demo-db/app.py:239-240"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "doc/impl drift"},
+    {"id": "F-Q", "severity": "P2", "lens": "safety/quality", "finding": "do_POST catches only JSON/sqlite errors; a non-dict JSON body or non-numeric Content-Length crashes uncaught", "evidence": ["demo-db/app.py:255", "demo-db/app.py:264-267", "demo-db/app.py:139"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "Tier-1 robustness"},
+    {"id": "F-P", "severity": "positive", "lens": "safety/demo-ux", "finding": "Claim discipline is real and test-enforced; no overclaim in shipped prose; STATIC_QA PASS", "evidence": ["demo/qa_static_demo.py:47-58", "docs/claim-boundary.md", "README.md:74-76"], "scout_status": "raised", "verifier_verdict": "VERIFIED", "gate_affected": "trust boundary"}
+  ],
+  "findings_summary": {"P0": 5, "P1": 7, "P2": 4, "positive": 1, "total": 17, "verifier_false_positives": 0, "verifier_all_verified": true},
+  "value_hypotheses": [
+    {"id": "H1", "label": "misdirected tokenized-settlement prevention", "metric": "count/value of token instructions caught pre-release with stale/incomplete evidence"},
+    {"id": "H2", "label": "fiat-fallback continuity", "metric": "percent of blocked token routes settling same value-date via fallback; time-to-fallback"},
+    {"id": "H3", "label": "triage-time reduction", "metric": "minutes from flagged to decision/repair"},
+    {"id": "H4", "label": "audit-preparation effort reduction", "metric": "hours to assemble an audit packet per exception"},
+    {"id": "H5", "label": "segregation-of-duties (gated on enforcement)", "metric": "override-without-resolution rate"},
+    {"id": "H6", "label": "beneficiary-data completeness reducing rework", "metric": "beneficiary-data return/rework rate"}
+  ],
+  "recommended_next_gate": {
+    "id": "GATE-1",
+    "name": "Compute the verdict",
+    "scope": "In demo-db/ only, replace hardcoded per-scenario decision/check fixtures with a deterministic rule evaluator deriving all three existing verdicts from settlement-endpoint, authority, allowlist, and payload field values.",
+    "acceptance_evidence": "Extended smoke asserts 5/5 correct computed verdicts: three existing scenarios reproduced (regression vs smoke.py:30-34) plus two new synthetic edge cases (missing fallback; simultaneous expired allowlist + authority). Paired cheap demand test: >=3 payment/treasury-ops contacts answer how many of the six checks they already cover.",
+    "closed_side_effect_gates_preserved": [
+      "no authentication added",
+      "no non-localhost bind",
+      "no real customer/payment/provider data",
+      "no live identity/authority/wallet/screening/chain-analytics call",
+      "no payment execution",
+      "no hosted deployment, migration, service restart, or public exposure",
+      "fixtures remain synthetic",
+      "changes confined to demo-db/ scaffold"
+    ]
+  },
+  "raf_decision_box": [
+    "Advisory vs blocking liability appetite (decides whether destination is Shape A or a permanent observe-only posture)",
+    "Wedge future: internal gate as end state vs beachhead toward a cross-counterparty registry",
+    "Which check becomes real/live-fed first (wallet-allowlist-freshness vs authority-evidence)",
+    "First design-partner profile: originating bank vs custodian vs creditor/fallback-SSI holder",
+    "Build vs partner for verification adapters (LEI/vLEI, custody, screening) — main lever on defensibility"
+  ],
+  "limitations": [
+    "Read-only review of a frozen snapshot; no code was changed and no production system was touched.",
+    "qa_browser_mobile.py was not executed (requires Playwright/Chromium, out of scope); its coverage was assessed by reading only.",
+    "Market, buyer, pricing, competitor, and regulatory statements are hypotheses; the repository contains no customers, prices, interviews, or telemetry.",
+    "Concurrency/SQLite-locking behavior was reasoned from code, not exercised under load.",
+    "The skeptic-verifier issued read-only sqlite queries against a pre-existing untracked demo-db/data/demo.sqlite; it did not seed or serve. That artifact is gitignored and was removed before final reconciliation.",
+    "Agent model identity is established via each agent's self-reported model id plus the configured topology, not via an external attestation service."
+  ],
+  "side_effect_reconciliation": {
+    "authorized_artifacts_created": [
+      "docs/product-shaping/fable-ultracode-product-review-2026-07-10.md",
+      "docs/product-shaping/fable-ultracode-product-review-evidence-2026-07-10.json"
+    ],
+    "generated_test_artifacts_removed": ["demo-db/data/ (generated demo.sqlite)", "any __pycache__/.artifacts caches"],
+    "existing_files_edited": "none",
+    "git_actions": "none (no add/commit/push/PR/merge/tag)",
+    "memory_written": "none",
+    "closed_gates_preserved": [
+      "no application code, existing docs, tests, configs, CI, package files, or git metadata edited",
+      "no commit/push/PR/merge/deploy/restart/migrate/DB-exposure",
+      "no live provider or production data access",
+      "no vault or unrelated repositories read",
+      "no secrets printed or stored",
+      "no Claude/project memory or agent notes written",
+      "no publication or Kanban work created",
+      "temporary files confined to /tmp/settlement_endpoint_fable_review_20260710/"
+    ],
+    "expected_final_git_status": "only the two authorized untracked artifacts under docs/product-shaping/"
+  }
+}
