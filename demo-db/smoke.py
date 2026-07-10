@@ -11,6 +11,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import migrate
+
 ROOT = Path(__file__).resolve().parent
 SEED = ROOT / "seed.py"
 APP = ROOT / "app.py"
@@ -26,8 +28,11 @@ EXPECTED_TABLE_COUNTS = {
     "audit_events": 18,
     "operator_actions": 0,
     "source_manifest": 4,
-    "schema_migrations": 2,
+    "schema_migrations": 3,
     "endpoint_profiles": 1,
+    "profile_decisions": 0,
+    "repair_tasks": 0,
+    "repair_events": 0,
 }
 EXPECTED_SLUGS = {"blocked", "refreshed", "authority"}
 EXPECTED_VERDICTS = {
@@ -37,6 +42,11 @@ EXPECTED_VERDICTS = {
 }
 APPROVED = EXPECTED_VERDICTS["refreshed"]
 BLOCKED = EXPECTED_VERDICTS["blocked"]
+# The backfilled active profile 1 wraps the shared scenario endpoint, whose
+# constituent evidence fields are scenario_driven placeholders; its intrinsic
+# advisory verdict is a manual hold (blocked from automated release), which the
+# SEC-P30 repair loop supersedes with an ALLOW from refreshed evidence.
+BASELINE_HOLD = "INSUFFICIENT_INPUT_MANUAL_HOLD"
 
 
 def profile_body(tag: str, *, authority: str = "current", allowlist: str = "current", payload: str = "complete") -> dict:
@@ -150,7 +160,7 @@ def main() -> None:
             raise SystemExit(f"READYZ_BAD {ready}")
         if ready.get("endpoint_profile_count") != 1:
             raise SystemExit(f"READYZ_PROFILE_BAD {ready}")
-        if ready.get("schema_version") != 5 or ready.get("source_file_count") != 4 or ready.get("source_row_estimate") != 0:
+        if ready.get("schema_version") != 6 or ready.get("source_file_count") != 4 or ready.get("source_row_estimate") != 0:
             raise SystemExit(f"READYZ_SOURCE_BAD {ready}")
 
         with urllib.request.urlopen(base + "/", timeout=4) as response:  # noqa: S310 - localhost smoke only
@@ -246,12 +256,82 @@ def main() -> None:
         if send_status(base, f"/api/endpoint-profiles/{profile_id}", "DELETE") not in (404, 405):
             raise SystemExit("PROFILE_DELETE_ROUTE_PRESENT")
 
-        # The three shipped scenarios still reproduce byte-for-byte after profile writes.
+        # --- SEC-P30 repair -> revalidation on the existing blocked active profile 1 ---
+        # Profile 1 is the backfilled active profile wrapping the shared scenario
+        # endpoint; its intrinsic advisory verdict is a manual hold. Carry it through
+        # open -> evidence refresh -> revalidation and prove the advisory overlay
+        # supersedes the baseline without mutating the immutable active profile.
+        before_repair = get_json(base, "/api/endpoint-profiles/1")
+        if before_repair["profile"]["lifecycle_state"] != "active":
+            raise SystemExit(f"REPAIR_PROFILE_NOT_ACTIVE {before_repair['profile']}")
+
+        opened = post_json(base, "/api/endpoint-profiles/1/repair", {"actor": "ops_analyst"})
+        baseline = opened["decision"]
+        if opened["repair_task"]["state"] != "open":
+            raise SystemExit(f"REPAIR_OPEN_STATE_BAD {opened['repair_task']}")
+        if baseline["version"] != 1 or baseline["origin"] != "baseline" or baseline["previous_decision_id"] is not None:
+            raise SystemExit(f"REPAIR_BASELINE_SHAPE_BAD {baseline}")
+        if baseline["verdict"] != BASELINE_HOLD or baseline["verdict"] == APPROVED:
+            raise SystemExit(f"REPAIR_BASELINE_NOT_BLOCKED {baseline['verdict']}")
+
+        refreshed = post_json(base, "/api/endpoint-profiles/1/repair/evidence",
+                              {"authority_status": "current", "allowlist_status": "current", "endpoint_payload_status": "complete"})
+        if refreshed["repair_task"]["state"] != "evidence_refreshed":
+            raise SystemExit(f"REPAIR_EVIDENCE_STATE_BAD {refreshed['repair_task']}")
+
+        revalidated = post_json(base, "/api/endpoint-profiles/1/repair/revalidation", {})
+        superseding = revalidated["decision"]
+        if superseding["version"] != 2 or superseding["origin"] != "revalidation":
+            raise SystemExit(f"REPAIR_REVAL_SHAPE_BAD {superseding}")
+        if superseding["verdict"] != APPROVED:
+            raise SystemExit(f"REPAIR_REVAL_NOT_ALLOW {superseding['verdict']}")
+        if superseding["previous_decision_id"] != baseline["id"]:
+            raise SystemExit(f"REPAIR_REVAL_LINK_BAD {superseding}")
+        if revalidated["repair_task"]["state"] != "resolved":
+            raise SystemExit(f"REPAIR_TASK_NOT_RESOLVED {revalidated['repair_task']}")
+
+        after_repair = get_json(base, "/api/endpoint-profiles/1")
+        decisions = after_repair["decisions"]
+        if [d["version"] for d in decisions] != [1, 2]:
+            raise SystemExit(f"REPAIR_DECISION_VERSIONS_BAD {[d['version'] for d in decisions]}")
+        # The prior decision remains queryable with its immutable evidence snapshot.
+        if decisions[0]["verdict"] != BASELINE_HOLD or not decisions[0].get("evidence"):
+            raise SystemExit(f"REPAIR_PRIOR_DECISION_BAD {decisions[0]}")
+        if decisions[1]["verdict"] != APPROVED:
+            raise SystemExit(f"REPAIR_LATEST_DECISION_BAD {decisions[1]}")
+        # Exact ordered append-only event trail.
+        if [e["event_type"] for e in after_repair["repair_events"]] != ["repair_opened", "evidence_refreshed", "revalidated"]:
+            raise SystemExit(f"REPAIR_EVENT_TRAIL_BAD {[e['event_type'] for e in after_repair['repair_events']]}")
+        # The immutable active profile is unchanged: lifecycle, constituent source
+        # fields, and intrinsic evaluation all identical to before the repair.
+        if after_repair["profile"]["lifecycle_state"] != "active":
+            raise SystemExit(f"REPAIR_PROFILE_MUTATED_STATE {after_repair['profile']}")
+        if after_repair["endpoint"] != before_repair["endpoint"]:
+            raise SystemExit("REPAIR_PROFILE_ENDPOINT_MUTATED")
+        if after_repair["evaluation"]["decision"]["verdict"] != before_repair["evaluation"]["decision"]["verdict"]:
+            raise SystemExit("REPAIR_PROFILE_EVAL_MUTATED")
+
+        # SEC-P30: the read surfaces promote the latest advisory verdict (ALLOW) while
+        # the intrinsic evaluation stays separately available and unchanged (a hold).
+        if after_repair.get("latest_decision", {}).get("verdict") != APPROVED or after_repair.get("verdict") != APPROVED:
+            raise SystemExit(f"REPAIR_ADVISORY_NOT_PROMOTED {after_repair.get('verdict')}")
+        if after_repair["evaluation"]["decision"]["verdict"] != BASELINE_HOLD:
+            raise SystemExit(f"REPAIR_INTRINSIC_NOT_SEPARATE {after_repair['evaluation']['decision']['verdict']}")
+        collection_after = {p["id"]: p for p in get_json(base, "/api/endpoint-profiles")["endpoint_profiles"]}
+        if collection_after[1]["verdict"] != APPROVED:
+            raise SystemExit(f"COLLECTION_VERDICT_NOT_PROMOTED {collection_after[1]['verdict']}")
+
+        # The three shipped scenarios still reproduce byte-for-byte after profile
+        # writes and the repair overlay.
         for slug, verdict in EXPECTED_VERDICTS.items():
             after = get_json(base, f"/api/scenarios/{slug}")
             if after["decision"]["verdict"] != verdict or after["payment_context"]["settlement_endpoint"]["id"] != 1:
                 raise SystemExit(f"SCENARIO_DRIFT_AFTER_PROFILES {slug} {after['decision']['verdict']}")
         profile_summary = {"created": profile_id, "replacement": replacement_id, "superseded_link": old["profile"]["superseded_by"]}
+        repair_summary = {
+            "profile": 1, "baseline_verdict": baseline["verdict"], "revalidated_verdict": superseding["verdict"],
+            "versions": [d["version"] for d in decisions], "task_state": revalidated["repair_task"]["state"],
+        }
     finally:
         proc.terminate()
         try:
@@ -259,6 +339,14 @@ def main() -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=4)
+
+    # A completed shipped-profile repair leaves a valid v6 database: migrate.py
+    # accepts it as already_current. The backfilled profile's baseline evidence is
+    # the intrinsic (scenario_driven) fields, which origin-aware validation permits,
+    # and every stored decision matches the deterministic evaluator output.
+    migrate_result = migrate.migrate(DB)
+    if migrate_result.get("status") != "already_current":
+        raise SystemExit(f"MIGRATE_NOT_ALREADY_CURRENT {migrate_result}")
 
     print("SMOKE PASS")
     print(f"database={DB}")
@@ -268,6 +356,8 @@ def main() -> None:
     print(f"audit_counts={json.dumps(audit_counts, sort_keys=True)}")
     print(f"source_manifest={json.dumps(source_manifest['lineage_summary'], sort_keys=True)}")
     print(f"endpoint_profiles={json.dumps(profile_summary, sort_keys=True)}")
+    print(f"repair_revalidation={json.dumps(repair_summary, sort_keys=True)}")
+    print(f"repair_migrate={migrate_result['status']}")
 
 
 if __name__ == "__main__":

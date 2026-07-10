@@ -266,8 +266,12 @@ def seed() -> dict[str, int | str]:
         con.executescript(SCHEMA)
         con.executescript(migrate.SCHEMA_MIGRATIONS_DDL)
         con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+        con.executescript(migrate.PROFILE_DECISIONS_DDL)
+        con.executescript(migrate.REPAIR_TASKS_DDL)
+        con.executescript(migrate.REPAIR_TASKS_OPEN_INDEX_DDL)
+        con.executescript(migrate.REPAIR_EVENTS_DDL)
         with con:
-            for table in ["endpoint_profiles", "operator_actions", "audit_events", "route_decisions", "policy_checks", "demo_scenarios", "route_policies", "settlement_endpoints", "legal_entities", "institutions", "source_manifest"]:
+            for table in ["repair_events", "repair_tasks", "profile_decisions", "endpoint_profiles", "operator_actions", "audit_events", "route_decisions", "policy_checks", "demo_scenarios", "route_policies", "settlement_endpoints", "legal_entities", "institutions", "source_manifest"]:
                 con.execute(f"DELETE FROM {table}")
 
             manifest = load_source_manifest()
@@ -354,7 +358,7 @@ def seed() -> dict[str, int | str]:
             migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, fixed_time)
 
         counts = {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in [
-            "institutions", "legal_entities", "settlement_endpoints", "route_policies", "demo_scenarios", "policy_checks", "route_decisions", "audit_events", "operator_actions", "source_manifest", "schema_migrations", "endpoint_profiles"
+            "institutions", "legal_entities", "settlement_endpoints", "route_policies", "demo_scenarios", "policy_checks", "route_decisions", "audit_events", "operator_actions", "source_manifest", "schema_migrations", "endpoint_profiles", "profile_decisions", "repair_tasks", "repair_events"
         ]}
         counts["database"] = str(DB_PATH)
         return counts

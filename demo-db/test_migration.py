@@ -145,6 +145,20 @@ def build_db(
         con.close()
 
 
+def create_current_repair_tables(con: sqlite3.Connection) -> None:
+    """Materialize the exact current (v6) SEC-P30 decision/repair/event tables.
+
+    A fixture that stamps CURRENT must carry the WHOLE current registry, not only
+    the v5 endpoint_profiles table, or fail-closed current-schema validation
+    (rightly) rejects it as not actually current. Uses the real module DDL so the
+    tables are byte-for-byte the declared current shape.
+    """
+    con.executescript(migrate.PROFILE_DECISIONS_DDL)
+    con.executescript(migrate.REPAIR_TASKS_DDL)
+    con.executescript(migrate.REPAIR_TASKS_OPEN_INDEX_DDL)
+    con.executescript(migrate.REPAIR_EVENTS_DDL)
+
+
 def legacy_v3(path: Path, **kwargs) -> None:
     """The real legacy state: seed_meta.schema_version=3 with PRAGMA user_version=0."""
     build_db(
@@ -489,10 +503,12 @@ class CurrentLedgerValidationTests(TempDbTestCase):
             ledger_rows=GOOD_LEDGER,
         )
         # A DB claiming CURRENT must also carry a well-formed, fully-covered
-        # endpoint_profiles registry for already_current to hold.
+        # endpoint_profiles registry AND the v6 decision/repair/event tables for
+        # already_current to hold.
         con = sqlite3.connect(path)
         con.executescript(migrate.ENDPOINT_PROFILES_DDL)
         migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, SYN_TIME)
+        create_current_repair_tables(con)
         con.commit()
         con.close()
         result = migrate.migrate(path)
@@ -618,12 +634,25 @@ class EndpointProfilesV5MigrationTests(TempDbTestCase):
             seed.seed()
 
     def _downgrade(self, path: Path, to_version: int) -> None:
-        """Turn a fresh v5 seed into a genuine earlier state (no endpoint_profiles)."""
+        """Turn a fresh CURRENT seed into a genuine earlier state.
+
+        A genuine pre-v5 state carries none of the tables or ledger rows added at
+        version 5 or later. The profiles registry is version 5 and the repair /
+        decision tables are version 6, so the ledger rows to strip are every row
+        with ``version > to_version`` -- NOT merely the single CURRENT row. Deleting
+        only ``version == CURRENT`` would leave a stale version-5 ledger row that
+        collides (UNIQUE(schema_migrations.version)) when the real 4->5 step records
+        version 5 again.
+        """
         con = sqlite3.connect(path)
         try:
+            # v6 decision/repair tables (v5+) and the v5 endpoint_profiles registry.
+            con.execute("DROP TABLE IF EXISTS repair_events")
+            con.execute("DROP TABLE IF EXISTS repair_tasks")
+            con.execute("DROP TABLE IF EXISTS profile_decisions")
             con.execute("DROP TABLE endpoint_profiles")
             if to_version == 4:
-                con.execute("DELETE FROM schema_migrations WHERE version = ?", (migrate.CURRENT_SCHEMA_VERSION,))
+                con.execute("DELETE FROM schema_migrations WHERE version > 4")
                 con.execute("UPDATE seed_meta SET value='4' WHERE key='schema_version'")
                 con.execute("PRAGMA user_version = 4")
             else:  # a true legacy v3: no ledger, user_version unset
@@ -658,7 +687,13 @@ class EndpointProfilesV5MigrationTests(TempDbTestCase):
         self.assertEqual(result["status"], "migrated")
         self.assertEqual(result["from"], 4)
         self.assertEqual(result["to"], migrate.CURRENT_SCHEMA_VERSION)
-        self.assertEqual(result["applied"], [migrate.PROFILES_MIGRATION_NAME])
+        # From a genuine v4 the runner traverses the profiles step (5) and then the
+        # repair/decision step (6) to reach CURRENT; the profiles-registry table
+        # creation and backfill asserted below prove the v5 step specifically ran.
+        self.assertEqual(
+            result["applied"],
+            [migrate.PROFILES_MIGRATION_NAME, migrate.REPAIR_DECISIONS_MIGRATION_NAME],
+        )
 
         self.assertTrue(table_exists(path, "endpoint_profiles"))
         self._assert_backfill_and_integrity(path)
@@ -916,6 +951,7 @@ class CurrentSchemaValidationTests(TempDbTestCase):
         def setup(con):
             con.executescript(migrate.ENDPOINT_PROFILES_DDL)
             migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, SYN_TIME)
+            create_current_repair_tables(con)
         path = self._v5("valid.sqlite", setup)
         self.assertEqual(migrate.migrate(path)["status"], "already_current")
 
@@ -1074,6 +1110,7 @@ class CurrentSchemaValidationTests(TempDbTestCase):
                 (2, migrate.SYNTHETIC_TENANT_ID, 2, "superseded", 3, SYN_TIME, SYN_TIME),
                 (3, migrate.SYNTHETIC_TENANT_ID, 3, "active", None, SYN_TIME, SYN_TIME),
             ])
+            create_current_repair_tables(con)
         path = self._v5("multi_hop.sqlite", setup)
         self.assertEqual(migrate.migrate(path)["status"], "already_current")
 
@@ -1279,6 +1316,854 @@ class EndpointProfilesDdlConstraintTests(unittest.TestCase):
         self._insert(con, pid=2, endpoint_id=2, state="superseded", superseded_by=3)
         self._insert(con, pid=3, endpoint_id=3, state="active")
         self.assertEqual(con.execute("SELECT COUNT(*) FROM endpoint_profiles").fetchone()[0], 3)
+
+
+class RepairSchemaRailValidationTests(TempDbTestCase):
+    """SEC-P30 (v6): valid CURRENT markers + ledger + a well-formed endpoint_profiles
+    registry are not enough. A DB claiming CURRENT must also carry the exact declared
+    profile_decisions, repair_tasks, and repair_events shapes and the exact one-open
+    partial UNIQUE index. Each fixture keeps every OTHER rail intact and weakens or
+    drops exactly one declared rail; current-schema validation must fail closed and
+    preserve state. Mirrors the endpoint_profiles rail tests.
+    """
+
+    def _current_v6(self, name, *, decisions_ddl=None, repair_ddl=None,
+                    events_ddl=None, open_index_ddl=None, mutate=None):
+        """A DB stamped CURRENT with the full registry, substituting any weakened DDL."""
+        path = self.db(name)
+        build_db(
+            path,
+            user_version=migrate.CURRENT_SCHEMA_VERSION,
+            seed_meta={"schema_version": str(migrate.CURRENT_SCHEMA_VERSION)},
+            ledger_rows=GOOD_LEDGER,
+        )
+        con = sqlite3.connect(path)  # foreign_keys OFF by default -> inject freely
+        try:
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, SYN_TIME)
+            con.executescript(decisions_ddl or migrate.PROFILE_DECISIONS_DDL)
+            con.executescript(repair_ddl or migrate.REPAIR_TASKS_DDL)
+            con.executescript(open_index_ddl or migrate.REPAIR_TASKS_OPEN_INDEX_DDL)
+            con.executescript(events_ddl or migrate.REPAIR_EVENTS_DDL)
+            if mutate is not None:
+                mutate(con)
+            con.commit()
+        finally:
+            con.close()
+        return path
+
+    def _assert_fails_closed(self, path):
+        with self.assertRaises(migrate.MigrationError) as cm:
+            migrate.migrate(path)
+        self.assertEqual(cm.exception.code, "inconsistent_version")
+        self.assertEqual(read_markers(path), (migrate.CURRENT_SCHEMA_VERSION, str(migrate.CURRENT_SCHEMA_VERSION)))
+
+    # -- GREEN anchor: the exact current v6 registry reports already_current -------
+
+    def test_exact_current_v6_reports_already_current(self):
+        self.assertEqual(migrate.migrate(self._current_v6("exact_v6.sqlite"))["status"], "already_current")
+
+    # -- profile_decisions rails --------------------------------------------------
+
+    def test_decisions_missing_table_fails_closed(self):
+        self._assert_fails_closed(self._current_v6(
+            "dec_missing.sqlite", decisions_ddl="CREATE TABLE _unused_decisions (id INTEGER PRIMARY KEY);"
+        ))
+
+    def test_decisions_rail_drops_fail_closed(self):
+        base = migrate.PROFILE_DECISIONS_DDL
+        variants = {
+            "drop_unique_profile_version": base.replace("    UNIQUE(profile_id, version),\n", ""),
+            "drop_unique_previous_decision": base.replace(
+                "previous_decision_id INTEGER UNIQUE REFERENCES", "previous_decision_id INTEGER REFERENCES"
+            ),
+            "drop_origin_enum_check": base.replace(
+                "origin TEXT NOT NULL CHECK(origin IN ('baseline','revalidation'))", "origin TEXT NOT NULL"
+            ),
+            "recase_origin_literal": base.replace("'baseline'", "'BASELINE'"),
+            "drop_notnull_verdict": base.replace("verdict TEXT NOT NULL", "verdict TEXT"),
+            "drop_profile_fk": base.replace(
+                "profile_id INTEGER NOT NULL REFERENCES endpoint_profiles(id)", "profile_id INTEGER NOT NULL"
+            ),
+            "drop_version_relationship_check": base.replace(
+                "    CHECK(\n"
+                "        (version = 1 AND origin = 'baseline' AND previous_decision_id IS NULL)\n"
+                "        OR (version > 1 AND origin = 'revalidation' AND previous_decision_id IS NOT NULL AND previous_decision_id <> id)\n"
+                "    )\n",
+                "    CHECK(version >= 1)\n",
+            ),
+            "weaken_self_link_guard": base.replace(" AND previous_decision_id <> id", ""),
+        }
+        for label, ddl in variants.items():
+            with self.subTest(rail=label):
+                self.assertNotEqual(ddl, base, f"{label} did not alter the DDL")
+                self._assert_fails_closed(self._current_v6(f"dec_{label}.sqlite", decisions_ddl=ddl))
+
+    # -- repair_tasks rails -------------------------------------------------------
+
+    def test_repair_rail_drops_fail_closed(self):
+        base = migrate.REPAIR_TASKS_DDL
+        variants = {
+            "drop_unique_resolved_decision": base.replace(
+                "resolved_decision_id INTEGER UNIQUE REFERENCES", "resolved_decision_id INTEGER REFERENCES"
+            ),
+            "drop_state_enum_check": base.replace(
+                "state TEXT NOT NULL CHECK(state IN ('open','evidence_refreshed','resolved'))", "state TEXT NOT NULL"
+            ),
+            "recase_state_literal": base.replace("'resolved'", "'RESOLVED'"),
+            "drop_opened_decision_fk": base.replace(
+                "opened_decision_id INTEGER NOT NULL REFERENCES profile_decisions(id)",
+                "opened_decision_id INTEGER NOT NULL",
+            ),
+            "drop_notnull_actor": base.replace("actor TEXT NOT NULL", "actor TEXT"),
+        }
+        for label, ddl in variants.items():
+            with self.subTest(rail=label):
+                self.assertNotEqual(ddl, base, f"{label} did not alter the DDL")
+                self._assert_fails_closed(self._current_v6(f"rt_{label}.sqlite", repair_ddl=ddl))
+
+    def test_repair_state_relationship_check_drop_fails_closed(self):
+        # Drop the whole state/field relationship CHECK, keeping the enum CHECK.
+        base = migrate.REPAIR_TASKS_DDL
+        # Excise the trailing comma too, so the weakened table is valid SQL (a bare
+        # comma before the closing paren would be a syntax error, not a weakened rail).
+        start = base.index(",\n    CHECK(\n        (state = 'open'")
+        end = base.index("    )\n);")
+        ddl = base[:start] + base[end + len("    )\n"):]
+        self.assertNotIn("refreshed_authority_status IS NULL", ddl)
+        self._assert_fails_closed(self._current_v6("rt_no_rel_check.sqlite", repair_ddl=ddl))
+
+    # -- the one-open partial UNIQUE index predicate ------------------------------
+
+    def test_partial_index_wrong_predicate_fails_closed(self):
+        # A partial UNIQUE index on profile_id but with a DIFFERENT predicate must
+        # fail closed: matching only "some partial unique index on profile_id" would
+        # wrongly accept a rail that does not enforce one-open-per-profile.
+        wrong = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS repair_tasks_one_open_per_profile "
+            "ON repair_tasks(profile_id) WHERE state = 'open';"
+        )
+        self._assert_fails_closed(self._current_v6("idx_wrong_pred.sqlite", open_index_ddl=wrong))
+
+    def test_partial_index_dropped_fails_closed(self):
+        self._assert_fails_closed(self._current_v6("idx_missing.sqlite", open_index_ddl="SELECT 1;"))
+
+    def test_full_unique_index_instead_of_partial_fails_closed(self):
+        # A full (non-partial) UNIQUE index on profile_id forbids ALL re-repair, not
+        # merely a second LIVE one; it is not the declared one-open rail.
+        full = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS repair_tasks_one_open_per_profile "
+            "ON repair_tasks(profile_id);"
+        )
+        self._assert_fails_closed(self._current_v6("idx_full.sqlite", open_index_ddl=full))
+
+    # -- repair_events rails ------------------------------------------------------
+
+    def test_events_missing_table_fails_closed(self):
+        self._assert_fails_closed(self._current_v6(
+            "ev_missing.sqlite", events_ddl="CREATE TABLE _unused_events (id INTEGER PRIMARY KEY);"
+        ))
+
+    def test_events_rail_drops_fail_closed(self):
+        base = migrate.REPAIR_EVENTS_DDL
+        variants = {
+            "drop_unique_task_sequence": base.replace("    UNIQUE(task_id, sequence),\n", ""),
+            "drop_unique_task_event": base.replace("    UNIQUE(task_id, event_type),\n", ""),
+            "drop_event_enum_check": base.replace(
+                "event_type TEXT NOT NULL CHECK(event_type IN ('repair_opened','evidence_refreshed','revalidated'))",
+                "event_type TEXT NOT NULL",
+            ),
+            "recase_event_literal": base.replace("'repair_opened'", "'REPAIR_OPENED'"),
+            "drop_task_fk": base.replace(
+                "task_id INTEGER NOT NULL REFERENCES repair_tasks(id)", "task_id INTEGER NOT NULL"
+            ),
+            "drop_notnull_sequence": base.replace("sequence INTEGER NOT NULL", "sequence INTEGER"),
+        }
+        for label, ddl in variants.items():
+            with self.subTest(rail=label):
+                self.assertNotEqual(ddl, base, f"{label} did not alter the DDL")
+                self._assert_fails_closed(self._current_v6(f"ev_{label}.sqlite", events_ddl=ddl))
+
+
+class RepairDecisionsV6MigrationTests(TempDbTestCase):
+    """SEC-P30: the real 5 -> 6 repair/decision migration against a TRUE v5 fixture.
+
+    A genuine v5 database carries the foundation ledger and the endpoint_profiles
+    registry (with its backfilled active profiles) but NONE of the v6 tables. The
+    5 -> 6 step must additively create profile_decisions, repair_tasks, repair_events
+    and the exact one-open partial UNIQUE index, preserve every existing profile /
+    operator-action / audit row byte-for-byte, be idempotent on a second run, and
+    roll the WHOLE step back atomically on an induced mid-step failure -- leaving the
+    v5 markers, data, and tables exactly as they were.
+    """
+
+    def _seed_full(self, path: Path) -> None:
+        with mock.patch.object(seed, "DB_PATH", path):
+            seed.seed()
+
+    def _downgrade_to_v5(self, path: Path) -> None:
+        """Turn a fresh CURRENT (v6) seed into a genuine v5 state.
+
+        The endpoint_profiles registry is version 5, so it (and its backfilled
+        rows) stays; only the version-6 decision/repair/event tables are dropped
+        and only the version-6 ledger row is stripped, with the markers moved back
+        to 5. Deleting rows with ``version > 5`` (not merely ``== 6``) keeps the
+        strip future-proof.
+        """
+        con = sqlite3.connect(path)
+        try:
+            con.execute("DROP TABLE IF EXISTS repair_events")
+            con.execute("DROP TABLE IF EXISTS repair_tasks")
+            con.execute("DROP TABLE IF EXISTS profile_decisions")
+            con.execute("DELETE FROM schema_migrations WHERE version > 5")
+            con.execute("UPDATE seed_meta SET value='5' WHERE key='schema_version'")
+            con.execute("PRAGMA user_version = 5")
+            con.commit()
+        finally:
+            con.close()
+
+    def _add_offbaseline_rows(self, path: Path) -> None:
+        """A synthetic operator action and audit event a fresh seed never writes,
+        so their preservation across 5 -> 6 can only be persistent local state."""
+        con = sqlite3.connect(path)
+        try:
+            con.execute(
+                "INSERT INTO operator_actions(scenario_id, action_type, actor, status, detail, created_at)"
+                " VALUES (1,'open_repair_task','ops_analyst','recorded','SYN-P30-preserve','2026-06-05T09:00:00Z')"
+            )
+            con.execute(
+                "INSERT INTO audit_events(scenario_id, display_order, event_type, title, detail, created_at)"
+                " VALUES (1,99,'action','Repair task opened','SYN-P30-audit','2026-06-05T09:00:00Z')"
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def _true_v5(self, name: str) -> Path:
+        """A genuine v5 DB with off-baseline preserved rows and no v6 tables."""
+        path = self.db(name)
+        self._seed_full(path)
+        self._add_offbaseline_rows(path)
+        self._downgrade_to_v5(path)
+        # Sanity: a real v5 state resolves to 5 and carries none of the v6 tables.
+        con = sqlite3.connect(path)
+        self.addCleanup(con.close)
+        self.assertEqual(migrate.detect_version(con), 5)
+        for table in ("profile_decisions", "repair_tasks", "repair_events"):
+            self.assertFalse(table_exists(path, table), f"{table} must be absent at true v5")
+        return path
+
+    @staticmethod
+    def _table_ddl(path: Path, name: str) -> str:
+        con = sqlite3.connect(path)
+        try:
+            row = con.execute(
+                "SELECT sql FROM sqlite_master WHERE name=?", (name,)
+            ).fetchone()
+            return row[0] if row and row[0] else ""
+        finally:
+            con.close()
+
+    def test_v5_to_v6_creates_repair_tables_and_exact_partial_index(self) -> None:
+        path = self._true_v5("v5_create.sqlite")
+
+        result = migrate.migrate(path)
+        self.assertEqual(result["status"], "migrated")
+        self.assertEqual(result["from"], 5)
+        self.assertEqual(result["to"], migrate.CURRENT_SCHEMA_VERSION)
+        self.assertEqual(result["applied"], [migrate.REPAIR_DECISIONS_MIGRATION_NAME])
+
+        # The three v6 tables now exist and each fingerprints to its exact declared shape.
+        for table, canonical in (
+            ("profile_decisions", migrate._CANONICAL_PROFILE_DECISIONS_DDL),
+            ("repair_tasks", migrate._CANONICAL_REPAIR_TASKS_DDL),
+            ("repair_events", migrate._CANONICAL_REPAIR_EVENTS_DDL),
+        ):
+            self.assertTrue(table_exists(path, table), f"{table} must be created by 5->6")
+            self.assertEqual(migrate._canonical_table_ddl(self._table_ddl(path, table)), canonical)
+        # The one-open partial UNIQUE index carries its exact declared predicate.
+        self.assertEqual(
+            migrate._canonical_table_ddl(self._table_ddl(path, "repair_tasks_one_open_per_profile")),
+            migrate._CANONICAL_REPAIR_OPEN_INDEX_DDL,
+        )
+        # Born empty (a purely additive step writes no repair rows).
+        for table in ("profile_decisions", "repair_tasks", "repair_events"):
+            self.assertEqual(len(read_rows(path, table, order_by="rowid")), 0)
+        self.assertEqual(read_markers(path), (migrate.CURRENT_SCHEMA_VERSION, str(migrate.CURRENT_SCHEMA_VERSION)))
+
+    def test_v5_to_v6_preserves_profiles_actions_and_audit(self) -> None:
+        path = self._true_v5("v5_preserve.sqlite")
+        profiles_before = read_rows(path, "endpoint_profiles", order_by="id")
+        business_before = business_snapshot(path)
+        self.assertEqual(len(read_rows(path, "operator_actions")), 1, "off-baseline operator action present")
+
+        result = migrate.migrate(path)
+        self.assertEqual(result["status"], "migrated")
+
+        # Endpoint profiles and every business table are byte-for-byte identical.
+        self.assertEqual(read_rows(path, "endpoint_profiles", order_by="id"), profiles_before)
+        self.assertEqual(business_snapshot(path), business_before)
+
+        # Structural integrity intact after the additive step.
+        con = sqlite3.connect(path)
+        self.addCleanup(con.close)
+        con.execute("PRAGMA foreign_keys = ON")
+        self.assertEqual(con.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.assertEqual(con.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_v5_to_v6_is_idempotent(self) -> None:
+        path = self._true_v5("v5_idem.sqlite")
+        first = migrate.migrate(path)
+        second = migrate.migrate(path)
+        self.assertEqual(first["status"], "migrated")
+        self.assertEqual(second["status"], "already_current")
+        self.assertEqual(second["applied"], [])
+        # No duplicate ledger rows and the repair tables stay empty on a second pass.
+        self.assertEqual(len(read_rows(path, "schema_migrations", order_by="version")), len(migrate.current_ledger()))
+        self.assertEqual(len(read_rows(path, "repair_events", order_by="rowid")), 0)
+
+    def test_v5_to_v6_rolls_back_whole_step_on_induced_failure(self) -> None:
+        # A 5 -> 6 step that creates ALL of the v6 tables and index and then fails
+        # mid-step must roll the WHOLE step back atomically: none of the three
+        # tables survive and the markers stay at v5 with data preserved.
+        path = self._true_v5("v5_rollback.sqlite")
+        profiles_before = read_rows(path, "endpoint_profiles", order_by="id")
+        business_before = business_snapshot(path)
+
+        def boom(con: sqlite3.Connection) -> None:
+            migrate._migrate_5_to_6(con)  # create every v6 table + the partial index
+            con.execute(
+                "INSERT INTO profile_decisions(tenant_id, profile_id, version, previous_decision_id, origin,"
+                " verdict, token_class, fiat_class, token_text, fiat_text, repair_text,"
+                " evidence_authority_status, evidence_allowlist_status, evidence_payload_status, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (migrate.SYNTHETIC_TENANT_ID, 1, 1, None, "baseline", "V", "warned", "warned",
+                 "t", "t", "t", "current", "current", "complete", SYN_TIME),
+            )
+            raise RuntimeError("induced 5->6 mid-step failure")
+
+        failing = [(5, migrate.CURRENT_SCHEMA_VERSION, "boom_repair", boom)]
+        with mock.patch.object(migrate, "MIGRATIONS", failing):
+            with self.assertRaises(migrate.MigrationError) as cm:
+                migrate.migrate(path)
+        self.assertEqual(cm.exception.code, "migration_failed")
+
+        # The whole step rolled back: no v6 table survives, markers stay v5.
+        for table in ("profile_decisions", "repair_tasks", "repair_events"):
+            self.assertFalse(table_exists(path, table), f"{table} creation must roll back")
+        self.assertFalse(
+            table_exists(path, "repair_tasks_one_open_per_profile"),
+            "the partial index must roll back with its table",
+        )
+        self.assertEqual(read_markers(path), (5, "5"), "version markers must stay at v5")
+        # Existing v5 data preserved byte-for-byte (profiles and every business table).
+        self.assertEqual(read_rows(path, "endpoint_profiles", order_by="id"), profiles_before)
+        self.assertEqual(business_snapshot(path), business_before)
+
+
+# Ordered synthetic step timestamps for the repair chain (T1 < T2 < ... < T6). The
+# first three drive a single cycle; T4..T6 extend it to a second (repeated) cycle.
+_T1 = "2026-06-05T09:00:00Z"
+_T2 = "2026-06-05T09:00:01Z"
+_T3 = "2026-06-05T09:00:02Z"
+_T4 = "2026-06-05T09:00:03Z"
+_T5 = "2026-06-05T09:00:04Z"
+_T6 = "2026-06-05T09:00:05Z"
+
+# The canonical synthetic fallback contract (the only supported values). A repair
+# chain fixture uses it so evaluator recomputation over the chain's evidence
+# matches the stored decision, exactly as the running app records it.
+_CANON_FALLBACK = {
+    "fallback_rail": "Fiat SSI route",
+    "fallback_currency": "EUR",
+    "fallback_account_mask": "DE•• •••• •••• 4400",
+    "fallback_intermediary_bic": "INTERDEFFXXX",
+}
+# The intrinsic constituent evidence the repair-chain fixture gives each backfilled
+# endpoint: a stale allowlist makes the intrinsic verdict BLOCKED, so a baseline
+# decision recorded from it is a genuine failing decision the repair supersedes.
+_CHAIN_INTRINSIC = {"authority_status": "current", "allowlist_status": "stale", "endpoint_payload_status": "complete"}
+
+
+def _eval_decision(*, authority, allowlist, payload):
+    """The evaluator's full decision over the given graded evidence plus the
+    canonical synthetic structure/fallback -- exactly what the app persists."""
+    import evaluator
+    return evaluator.evaluate({
+        "institution_present": True,
+        "institution_reachable": True,
+        "legal_entity_present": True,
+        "authority_status": authority,
+        "allowlist_status": allowlist,
+        "payload_status": payload,
+        **_CANON_FALLBACK,
+    })["decision"]
+
+
+def enrich_chain_constituents(con: sqlite3.Connection) -> None:
+    """Give the minimal fixture endpoints real constituent evidence + a legal entity.
+
+    The base fixture's settlement_endpoints has only an ``id`` column; the v6
+    row-integrity validator recomputes each stored decision from the profile's
+    intrinsic constituent fields, so a repair-chain fixture must carry those fields
+    (a legal entity's authority status and the endpoint's allowlist / payload /
+    fallback) for every backfilled endpoint.
+    """
+    con.executescript(
+        "CREATE TABLE legal_entities (id INTEGER PRIMARY KEY, authority_status TEXT NOT NULL);\n"
+        "ALTER TABLE settlement_endpoints ADD COLUMN legal_entity_id INTEGER;\n"
+        "ALTER TABLE settlement_endpoints ADD COLUMN allowlist_status TEXT;\n"
+        "ALTER TABLE settlement_endpoints ADD COLUMN endpoint_payload_status TEXT;\n"
+        "ALTER TABLE settlement_endpoints ADD COLUMN fallback_rail TEXT;\n"
+        "ALTER TABLE settlement_endpoints ADD COLUMN fallback_currency TEXT;\n"
+        "ALTER TABLE settlement_endpoints ADD COLUMN fallback_account_mask TEXT;\n"
+        "ALTER TABLE settlement_endpoints ADD COLUMN fallback_intermediary_bic TEXT;\n"
+    )
+    for (endpoint_id,) in con.execute("SELECT id FROM settlement_endpoints ORDER BY id").fetchall():
+        con.execute(
+            "INSERT INTO legal_entities(id, authority_status) VALUES (?, ?)",
+            (endpoint_id, _CHAIN_INTRINSIC["authority_status"]),
+        )
+        con.execute(
+            "UPDATE settlement_endpoints SET legal_entity_id=?, allowlist_status=?, endpoint_payload_status=?,"
+            " fallback_rail=?, fallback_currency=?, fallback_account_mask=?, fallback_intermediary_bic=? WHERE id=?",
+            (
+                endpoint_id, _CHAIN_INTRINSIC["allowlist_status"], _CHAIN_INTRINSIC["endpoint_payload_status"],
+                _CANON_FALLBACK["fallback_rail"], _CANON_FALLBACK["fallback_currency"],
+                _CANON_FALLBACK["fallback_account_mask"], _CANON_FALLBACK["fallback_intermediary_bic"], endpoint_id,
+            ),
+        )
+
+
+class RepairRowIntegrityValidationTests(TempDbTestCase):
+    """SEC-P30 (v6): an exact-shape v6 registry is not enough -- the stored
+    decision / repair / event ROWS must obey the cross-row invariants no per-row
+    SQLite constraint can prove. A valid baseline -> revalidation decision chain, a
+    resolved task, and its three-event trail are the green anchor; each focused
+    corruption injects exactly one cross-row defect that must fail closed with the
+    stable ``inconsistent_version`` code while preserving the version markers. The
+    exact-schema rails are never weakened (see RepairSchemaRailValidationTests).
+    """
+
+    def _current_v6_with_chain(self, name, *, corrupt=None) -> Path:
+        """A DB stamped CURRENT with the full registry and one valid repair chain.
+
+        foreign_keys is OFF for the fixture connection, so a corruption callback can
+        inject rows the running app never would (e.g. a decision on an absent
+        profile) to exercise the validator directly.
+        """
+        path = self.db(name)
+        build_db(
+            path,
+            user_version=migrate.CURRENT_SCHEMA_VERSION,
+            seed_meta={"schema_version": str(migrate.CURRENT_SCHEMA_VERSION)},
+            ledger_rows=GOOD_LEDGER,
+        )
+        con = sqlite3.connect(path)
+        try:
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, SYN_TIME)
+            enrich_chain_constituents(con)
+            create_current_repair_tables(con)
+            self._insert_valid_chain(con)
+            if corrupt is not None:
+                corrupt(con)
+            con.commit()
+        finally:
+            con.close()
+        return path
+
+    @staticmethod
+    def _insert_decision(con, *, did, profile_id, version, previous, origin, tenant=migrate.SYNTHETIC_TENANT_ID,
+                         authority="current", allowlist="current", payload="complete", created_at=_T1,
+                         verdict="V", decision=None):
+        """Insert a decision row. By default it carries a placeholder verdict/text
+        (fine for corruption cases that fail an earlier structural rail); pass
+        ``decision`` (a full evaluator decision dict) for a row that must survive the
+        deterministic-decision check on a real profile chain."""
+        if decision is None:
+            decision = {"verdict": verdict, "token_class": "warned", "fiat_class": "warned",
+                        "token_text": "t", "fiat_text": "t", "repair_text": "t"}
+        con.execute(
+            "INSERT INTO profile_decisions(id, tenant_id, profile_id, version, previous_decision_id, origin,"
+            " verdict, token_class, fiat_class, token_text, fiat_text, repair_text,"
+            " evidence_authority_status, evidence_allowlist_status, evidence_payload_status, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (did, tenant, profile_id, version, previous, origin,
+             decision["verdict"], decision["token_class"], decision["fiat_class"],
+             decision["token_text"], decision["fiat_text"], decision["repair_text"],
+             authority, allowlist, payload, created_at),
+        )
+
+    def _insert_valid_chain(self, con) -> None:
+        """profile 1: v1 baseline (intrinsic BLOCKED) -> v2 revalidation (refreshed
+        ALLOW), a resolved repair task, and the ordered three-event trail. Both
+        decisions are evaluator-consistent: the baseline snapshots the profile's
+        intrinsic constituents and the revalidation the refreshed evidence."""
+        baseline = _eval_decision(authority="current", allowlist="stale", payload="complete")
+        revalidation = _eval_decision(authority="current", allowlist="current", payload="complete")
+        self._insert_decision(con, did=1, profile_id=1, version=1, previous=None, origin="baseline",
+                              authority="current", allowlist="stale", payload="complete",
+                              created_at=_T1, decision=baseline)
+        self._insert_decision(con, did=2, profile_id=1, version=2, previous=1, origin="revalidation",
+                              authority="current", allowlist="current", payload="complete",
+                              created_at=_T3, decision=revalidation)
+        con.execute(
+            "INSERT INTO repair_tasks(id, tenant_id, profile_id, actor, state, opened_decision_id, resolved_decision_id,"
+            " refreshed_authority_status, refreshed_allowlist_status, refreshed_payload_status,"
+            " created_at, evidence_refreshed_at, resolved_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (1, migrate.SYNTHETIC_TENANT_ID, 1, "ops_analyst", "resolved", 1, 2,
+             "current", "current", "complete", _T1, _T2, _T3),
+        )
+        con.executemany(
+            "INSERT INTO repair_events(id, tenant_id, profile_id, task_id, sequence, event_type, actor, decision_id, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, 1, 1, "repair_opened", "ops_analyst", 1, _T1),
+                (2, migrate.SYNTHETIC_TENANT_ID, 1, 1, 2, "evidence_refreshed", "ops_analyst", None, _T2),
+                (3, migrate.SYNTHETIC_TENANT_ID, 1, 1, 3, "revalidated", "ops_analyst", 2, _T3),
+            ],
+        )
+
+    def _current_v6_with_repeated_cycle(self, name, *, corrupt=None) -> Path:
+        """A DB stamped CURRENT with the full registry and a legal REPEATED repair
+        history on profile 1: v1 baseline (BLOCKED) resolved to v2 (a still-failing
+        revalidation HOLD), then a SECOND cycle opening that v2 and resolving to v3
+        (ALLOW). Two resolved tasks, each with its ordered three-event trail -- the
+        'repeated HOLD -> next-repair cycle' legal state. A corruption callback can
+        inject exactly one cross-cycle defect (foreign keys are OFF here)."""
+        path = self.db(name)
+        build_db(
+            path,
+            user_version=migrate.CURRENT_SCHEMA_VERSION,
+            seed_meta={"schema_version": str(migrate.CURRENT_SCHEMA_VERSION)},
+            ledger_rows=GOOD_LEDGER,
+        )
+        con = sqlite3.connect(path)
+        try:
+            con.executescript(migrate.ENDPOINT_PROFILES_DDL)
+            migrate.backfill_active_profiles(con, migrate.SYNTHETIC_TENANT_ID, SYN_TIME)
+            enrich_chain_constituents(con)
+            create_current_repair_tables(con)
+            self._insert_repeated_cycle(con)
+            if corrupt is not None:
+                corrupt(con)
+            con.commit()
+        finally:
+            con.close()
+        return path
+
+    def _insert_repeated_cycle(self, con) -> None:
+        """profile 1: v1 baseline (intrinsic BLOCKED) -> T1 resolves to v2
+        (revalidation AUTHORITY_HOLD, still failing) -> T2 opens that v2 and resolves
+        to v3 (revalidation ALLOW). Every decision is evaluator-consistent, every
+        task opens a FAILING decision, and each task.created_at is >= its opened
+        decision.created_at (the v1 open is atomic with the baseline)."""
+        baseline = _eval_decision(authority="current", allowlist="stale", payload="complete")      # BLOCKED
+        reval_hold = _eval_decision(authority="expired", allowlist="current", payload="complete")   # AUTHORITY_HOLD
+        reval_allow = _eval_decision(authority="current", allowlist="current", payload="complete")  # ALLOW
+        self._insert_decision(con, did=1, profile_id=1, version=1, previous=None, origin="baseline",
+                              authority="current", allowlist="stale", payload="complete",
+                              created_at=_T1, decision=baseline)
+        self._insert_decision(con, did=2, profile_id=1, version=2, previous=1, origin="revalidation",
+                              authority="expired", allowlist="current", payload="complete",
+                              created_at=_T3, decision=reval_hold)
+        self._insert_decision(con, did=3, profile_id=1, version=3, previous=2, origin="revalidation",
+                              authority="current", allowlist="current", payload="complete",
+                              created_at=_T6, decision=reval_allow)
+        con.executemany(
+            "INSERT INTO repair_tasks(id, tenant_id, profile_id, actor, state, opened_decision_id, resolved_decision_id,"
+            " refreshed_authority_status, refreshed_allowlist_status, refreshed_payload_status,"
+            " created_at, evidence_refreshed_at, resolved_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, "ops_analyst", "resolved", 1, 2,
+                 "expired", "current", "complete", _T1, _T2, _T3),
+                (2, migrate.SYNTHETIC_TENANT_ID, 1, "ops_analyst", "resolved", 2, 3,
+                 "current", "current", "complete", _T4, _T5, _T6),
+            ],
+        )
+        con.executemany(
+            "INSERT INTO repair_events(id, tenant_id, profile_id, task_id, sequence, event_type, actor, decision_id, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                (1, migrate.SYNTHETIC_TENANT_ID, 1, 1, 1, "repair_opened", "ops_analyst", 1, _T1),
+                (2, migrate.SYNTHETIC_TENANT_ID, 1, 1, 2, "evidence_refreshed", "ops_analyst", None, _T2),
+                (3, migrate.SYNTHETIC_TENANT_ID, 1, 1, 3, "revalidated", "ops_analyst", 2, _T3),
+                (4, migrate.SYNTHETIC_TENANT_ID, 1, 2, 1, "repair_opened", "ops_analyst", 2, _T4),
+                (5, migrate.SYNTHETIC_TENANT_ID, 1, 2, 2, "evidence_refreshed", "ops_analyst", None, _T5),
+                (6, migrate.SYNTHETIC_TENANT_ID, 1, 2, 3, "revalidated", "ops_analyst", 3, _T6),
+            ],
+        )
+
+    def _assert_fails_closed(self, path):
+        with self.assertRaises(migrate.MigrationError) as cm:
+            migrate.migrate(path)
+        self.assertEqual(cm.exception.code, "inconsistent_version")
+        self.assertEqual(read_markers(path), (migrate.CURRENT_SCHEMA_VERSION, str(migrate.CURRENT_SCHEMA_VERSION)))
+
+    # -- GREEN anchor: the valid chain reports already_current --------------------
+
+    def test_valid_repair_chain_reports_already_current(self):
+        path = self._current_v6_with_chain("rows_valid.sqlite")
+        self.assertEqual(migrate.migrate(path)["status"], "already_current")
+
+    # -- decision row corruptions -------------------------------------------------
+
+    def test_dangling_decision_profile_fails_closed(self):
+        # A self-consistent baseline decision whose profile_id is absent from
+        # endpoint_profiles: the per-row FK is not retroactively enforced on stored
+        # rows, so only a cross-row profile-resolution check catches it.
+        def corrupt(con):
+            self._insert_decision(con, did=3, profile_id=9999, version=1, previous=None, origin="baseline")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_dangling_decision.sqlite", corrupt=corrupt))
+
+    def test_foreign_tenant_decision_fails_closed(self):
+        def corrupt(con):
+            self._insert_decision(con, did=3, profile_id=2, version=1, previous=None, origin="baseline",
+                                  tenant="attacker-tenant")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_foreign_tenant.sqlite", corrupt=corrupt))
+
+    def test_noncontiguous_decision_versions_fail_closed(self):
+        # A version gap (1, 2, 4) breaks the contiguous 1..N lineage a valid
+        # baseline-then-revalidation chain must form.
+        def corrupt(con):
+            self._insert_decision(con, did=3, profile_id=1, version=4, previous=2, origin="revalidation",
+                                  created_at=_T3)
+        self._assert_fails_closed(self._current_v6_with_chain("rows_noncontiguous.sqlite", corrupt=corrupt))
+
+    # -- reverse decision provenance: every decision owned by a repair task -------
+
+    def test_orphan_decision_chain_without_owning_tasks_fails_closed(self):
+        # An exact-current, evaluator-consistent v1 baseline -> v2 revalidation chain
+        # whose owning repair tasks and events have been removed (foreign keys off in
+        # the fixture connection), leaving the decisions orphaned. The chain stays
+        # internally consistent and reads would still promote its latest decision,
+        # but no task opened the baseline and no task resolved the revalidation, so
+        # the required action/event/decision provenance is absent. The forward
+        # task -> decision checks cannot see this; only reverse decision provenance
+        # (every baseline opened, every revalidation resolved) rejects it.
+        def corrupt(con):
+            con.execute("DELETE FROM repair_events")
+            con.execute("DELETE FROM repair_tasks")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_orphan_chain.sqlite", corrupt=corrupt))
+
+    # -- hold-only provenance: a repair may only open a FAILING decision ----------
+
+    def test_task_opens_approved_decision_fails_closed(self):
+        # An otherwise-coherent LIVE repair whose opened decision reads as APPROVED.
+        # open_repair_task returns nothing_to_repair for an approved latest decision,
+        # so a persisted task opening one has no repair basis: it must fail closed.
+        # profile 2 (a bare backfilled active profile) is made intrinsically APPROVED
+        # and given an open task on an evaluator-consistent APPROVED v1 baseline, so
+        # every other invariant holds and only the hold-only rule rejects it.
+        def corrupt(con):
+            con.execute("UPDATE settlement_endpoints SET allowlist_status='current' WHERE id=2")
+            approved = _eval_decision(authority="current", allowlist="current", payload="complete")
+            self._insert_decision(con, did=3, profile_id=2, version=1, previous=None, origin="baseline",
+                                  authority="current", allowlist="current", payload="complete",
+                                  created_at=_T1, decision=approved)
+            con.execute(
+                "INSERT INTO repair_tasks(id, tenant_id, profile_id, actor, state, opened_decision_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "ops_analyst", "open", 3, _T1),
+            )
+            con.execute(
+                "INSERT INTO repair_events(id, tenant_id, profile_id, task_id, sequence, event_type, actor, decision_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (4, migrate.SYNTHETIC_TENANT_ID, 2, 2, 1, "repair_opened", "ops_analyst", 3, _T1),
+            )
+        self._assert_fails_closed(self._current_v6_with_chain("rows_open_approved.sqlite", corrupt=corrupt))
+
+    # -- opened-decision chronology + the legal repeated-cycle history -------------
+
+    def test_valid_repeated_cycle_reports_already_current(self):
+        # The 'repeated HOLD -> next-repair cycle' history is legal and must be
+        # preserved: v1 -> v2 (HOLD) -> v3 (ALLOW) across two resolved tasks.
+        path = self._current_v6_with_repeated_cycle("rows_repeated_cycle.sqlite")
+        self.assertEqual(migrate.migrate(path)["status"], "already_current")
+
+    def test_later_task_predates_opened_revalidation_fails_closed(self):
+        # The second cycle's task opens the v2 revalidation decision (created at _T3)
+        # but claims a created_at of _T2 -- before that decision existed. Its own step
+        # timeline stays monotonic and its events stay step-aligned, so ONLY the
+        # opened-decision chronology invariant (task.created_at >= the opened
+        # decision's created_at) can reject it.
+        def corrupt(con):
+            con.execute("UPDATE repair_tasks SET created_at=? WHERE id=2", (_T2,))
+            con.execute("UPDATE repair_events SET created_at=? WHERE task_id=2 AND sequence=1", (_T2,))
+        self._assert_fails_closed(
+            self._current_v6_with_repeated_cycle("rows_task_predates_reval.sqlite", corrupt=corrupt)
+        )
+
+    def test_live_task_retargeted_to_non_latest_decision_fails_closed(self):
+        # A third, LIVE (open) task whose opened decision AND its event are retargeted
+        # to the already-superseded v2 (a non-latest older decision) rather than the
+        # latest v3. v2 is already opened by the second cycle's task, so reverse
+        # decision provenance (a decision opened by more than one task) rejects it.
+        # Complements the orphan-chain regression (a decision opened by NO task).
+        def corrupt(con):
+            con.execute(
+                "INSERT INTO repair_tasks(id, tenant_id, profile_id, actor, state, opened_decision_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (3, migrate.SYNTHETIC_TENANT_ID, 1, "ops_analyst", "open", 2, _T6),
+            )
+            con.execute(
+                "INSERT INTO repair_events(id, tenant_id, profile_id, task_id, sequence, event_type, actor, decision_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (7, migrate.SYNTHETIC_TENANT_ID, 1, 3, 1, "repair_opened", "ops_analyst", 2, _T6),
+            )
+        self._assert_fails_closed(
+            self._current_v6_with_repeated_cycle("rows_retarget_older.sqlite", corrupt=corrupt)
+        )
+
+    # -- repair task row corruptions ----------------------------------------------
+
+    def test_mis_scoped_task_decision_fails_closed(self):
+        # A task on profile 2 whose opened decision belongs to profile 1.
+        def corrupt(con):
+            con.execute(
+                "INSERT INTO repair_tasks(id, tenant_id, profile_id, actor, state, opened_decision_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "ops_analyst", "open", 1, _T1),
+            )
+        self._assert_fails_closed(self._current_v6_with_chain("rows_mis_scoped_task.sqlite", corrupt=corrupt))
+
+    def test_dangling_task_profile_fails_closed(self):
+        # A task whose profile_id is absent from endpoint_profiles (its opened
+        # decision points at a real profile-1 decision): the task-side of the
+        # profile-resolution check must reject it.
+        def corrupt(con):
+            con.execute(
+                "INSERT INTO repair_tasks(id, tenant_id, profile_id, actor, state, opened_decision_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (2, migrate.SYNTHETIC_TENANT_ID, 9999, "ops_analyst", "open", 1, _T1),
+            )
+        self._assert_fails_closed(self._current_v6_with_chain("rows_dangling_task.sqlite", corrupt=corrupt))
+
+    def test_task_timestamp_inversion_fails_closed(self):
+        # evidence_refreshed_at precedes created_at: non-monotonic step timeline.
+        def corrupt(con):
+            con.execute(
+                "UPDATE repair_tasks SET evidence_refreshed_at='2026-06-05T08:59:00Z' WHERE id=1"
+            )
+        self._assert_fails_closed(self._current_v6_with_chain("rows_ts_inversion.sqlite", corrupt=corrupt))
+
+    # -- repair event row corruptions ---------------------------------------------
+
+    def test_event_actor_mismatch_fails_closed(self):
+        def corrupt(con):
+            con.execute("UPDATE repair_events SET actor='intruder' WHERE task_id=1 AND sequence=2")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_event_actor.sqlite", corrupt=corrupt))
+
+    def test_event_timestamp_mismatch_fails_closed(self):
+        # The evidence event's timestamp no longer equals the task's refreshed step time.
+        def corrupt(con):
+            con.execute("UPDATE repair_events SET created_at='2026-06-05T23:00:00Z' WHERE task_id=1 AND sequence=2")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_event_ts.sqlite", corrupt=corrupt))
+
+    def test_incomplete_event_prefix_fails_closed(self):
+        # A resolved task missing its final revalidated event: the trail is no
+        # longer the legal prefix for the task's state.
+        def corrupt(con):
+            con.execute("DELETE FROM repair_events WHERE task_id=1 AND sequence=3")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_incomplete_prefix.sqlite", corrupt=corrupt))
+
+    # -- deterministic decision-snapshot corruptions (SEC-P30 blocker 5) ----------
+
+    def test_arbitrary_verdict_fails_closed(self):
+        # A stored verdict the evaluator never produces for the decision's inputs.
+        def corrupt(con):
+            con.execute("UPDATE profile_decisions SET verdict='TOTALLY_FABRICATED_VERDICT' WHERE id=1")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_bad_verdict.sqlite", corrupt=corrupt))
+
+    def test_arbitrary_decision_text_fails_closed(self):
+        # Tampered decision text (a class/text field) inconsistent with the evaluator.
+        def corrupt(con):
+            con.execute("UPDATE profile_decisions SET repair_text='tampered repair text' WHERE id=2")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_bad_text.sqlite", corrupt=corrupt))
+
+    def test_arbitrary_class_fails_closed(self):
+        def corrupt(con):
+            con.execute("UPDATE profile_decisions SET token_class='selected' WHERE id=1")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_bad_class.sqlite", corrupt=corrupt))
+
+    def test_baseline_evidence_mismatch_fails_closed(self):
+        # A baseline whose evidence no longer equals the profile's intrinsic
+        # constituent fields (intrinsic allowlist is 'stale').
+        def corrupt(con):
+            con.execute("UPDATE profile_decisions SET evidence_allowlist_status='current' WHERE id=1")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_baseline_evidence.sqlite", corrupt=corrupt))
+
+    def test_revalidation_evidence_mismatch_with_task_fails_closed(self):
+        # The resolving decision's evidence snapshot no longer equals its task's
+        # refreshed evidence (a supported enum, so only the correspondence catches it).
+        def corrupt(con):
+            con.execute("UPDATE repair_tasks SET refreshed_allowlist_status='stale' WHERE id=1")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_reval_task_evidence.sqlite", corrupt=corrupt))
+
+    def test_revalidation_timestamp_mismatch_with_resolved_at_fails_closed(self):
+        # The resolving decision's created_at no longer equals the task's resolved_at.
+        def corrupt(con):
+            con.execute("UPDATE profile_decisions SET created_at=? WHERE id=2", (_T2,))
+        self._assert_fails_closed(self._current_v6_with_chain("rows_reval_ts.sqlite", corrupt=corrupt))
+
+    def test_decision_output_inconsistent_with_evaluator_fails_closed(self):
+        # Evidence that is a supported enum but whose stored decision does not match
+        # the evaluator output over it (payload flipped without updating the verdict).
+        def corrupt(con):
+            con.execute("UPDATE profile_decisions SET evidence_payload_status='incomplete' WHERE id=2")
+            con.execute("UPDATE repair_tasks SET refreshed_payload_status='incomplete' WHERE id=1")
+        self._assert_fails_closed(self._current_v6_with_chain("rows_eval_inconsistent.sqlite", corrupt=corrupt))
+
+    # -- live repair must sit on an active profile (SEC-P30 blocker 2) ------------
+
+    def test_live_task_on_non_active_profile_fails_closed(self):
+        # A superseded profile that still carries a live (open) repair task: it must
+        # be impossible to both supersede a profile and leave a live repair on it.
+        def corrupt(con):
+            # profile 2 (backfilled active over endpoint 2) becomes superseded by 1.
+            con.execute("UPDATE endpoint_profiles SET lifecycle_state='superseded', superseded_by=1 WHERE id=2")
+            baseline = _eval_decision(authority="current", allowlist="stale", payload="complete")
+            self._insert_decision(con, did=3, profile_id=2, version=1, previous=None, origin="baseline",
+                                  authority="current", allowlist="stale", payload="complete",
+                                  created_at=_T1, decision=baseline)
+            con.execute(
+                "INSERT INTO repair_tasks(id, tenant_id, profile_id, actor, state, opened_decision_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (2, migrate.SYNTHETIC_TENANT_ID, 2, "ops_analyst", "open", 3, _T1),
+            )
+            con.execute(
+                "INSERT INTO repair_events(id, tenant_id, profile_id, task_id, sequence, event_type, actor, decision_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (4, migrate.SYNTHETIC_TENANT_ID, 2, 2, 1, "repair_opened", "ops_analyst", 3, _T1),
+            )
+        self._assert_fails_closed(self._current_v6_with_chain("rows_live_on_superseded.sqlite", corrupt=corrupt))
+
+    def test_resolved_task_on_draft_profile_fails_closed(self):
+        # A draft cannot have repair history: open_repair_task only opens on an
+        # active profile. Even a fully coherent resolved task/decision/event chain
+        # is therefore impossible when attached to a draft and must fail closed.
+        def corrupt(con):
+            con.execute(
+                "UPDATE endpoint_profiles SET lifecycle_state='draft', superseded_by=NULL WHERE id=1"
+            )
+        self._assert_fails_closed(
+            self._current_v6_with_chain("rows_resolved_on_draft.sqlite", corrupt=corrupt)
+        )
+
+    def test_resolved_task_on_superseded_profile_stays_queryable(self):
+        # Historical RESOLVED tasks/decisions on a superseded profile remain valid
+        # and queryable. Supersession is the sole legal non-active state for prior
+        # repair history; draft profiles can never have opened a repair.
+        def corrupt(con):
+            con.execute("UPDATE endpoint_profiles SET lifecycle_state='superseded', superseded_by=2 WHERE id=1")
+            con.execute("UPDATE endpoint_profiles SET superseded_by=NULL WHERE id=2")
+        # profile 1 keeps its resolved task + full chain; superseding it must not
+        # invalidate that history, so the DB still reports already_current.
+        path = self._current_v6_with_chain("rows_resolved_on_superseded.sqlite", corrupt=corrupt)
+        self.assertEqual(migrate.migrate(path)["status"], "already_current")
 
 
 if __name__ == "__main__":

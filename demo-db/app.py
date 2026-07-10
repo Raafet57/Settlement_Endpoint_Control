@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from evaluator import evaluate
+from evaluator import evaluate, APPROVED as APPROVED_VERDICT
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "data" / "demo.sqlite"
@@ -86,6 +86,32 @@ PROFILE_INSTITUTION_ROLE = "creditor_agent"
 PROFILE_INSTITUTION_REACHABILITY = "Synthetic institution evidence and fallback SSI holder."
 PROFILE_AUTHORITY_DETAIL = "Synthetic vLEI-style authority evidence represented by the created profile."
 PROFILE_MAINTAINER = "Synthetic treasury operations (localhost demo)."
+
+# --- Repair / versioned-decision workflow (SEC-P30) -------------------------
+# The repair loop layers versioned advisory decisions over an ACTIVE profile
+# without mutating the immutable aggregate: refreshed evidence is persisted on the
+# repair task and the superseding decision is computed from it. Legal step order
+# is open -> evidence_refreshed -> resolved.
+REPAIR_OPEN = "open"
+REPAIR_EVIDENCE_REFRESHED = "evidence_refreshed"
+REPAIR_RESOLVED = "resolved"
+DECISION_BASELINE = "baseline"
+DECISION_REVALIDATION = "revalidation"
+# The append-only repair-event trail. Exactly one event is appended per state
+# step, at a fixed per-task sequence, so the ordered audit sequence is explicit.
+EVENT_REPAIR_OPENED = "repair_opened"
+EVENT_EVIDENCE_REFRESHED = "evidence_refreshed"
+EVENT_REVALIDATED = "revalidated"
+EVENT_SEQ_OPEN = 1
+EVENT_SEQ_EVIDENCE = 2
+EVENT_SEQ_REVALIDATION = 3
+# The exact refreshed-evidence body: the three graded status fields, each an
+# existing supported enum. No coercion; unknown/extra keys are rejected.
+EVIDENCE_REFRESH_SPEC = {
+    "authority_status": AUTHORITY_STATES,
+    "allowlist_status": ALLOWLIST_STATES,
+    "endpoint_payload_status": PAYLOAD_STATES,
+}
 
 
 def get_db() -> sqlite3.Connection:
@@ -460,6 +486,41 @@ def validated_replacement(payload: dict) -> int:
     return payload["replacement_id"]
 
 
+def validated_repair_actor(payload: dict) -> str:
+    """Extract the opening operator from a repair-open body: exactly {actor}."""
+    if not isinstance(payload, dict) or set(payload) != {"actor"}:
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_actor")
+    actor = payload["actor"]
+    if not isinstance(actor, str) or actor not in ALLOWED_ACTORS:
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_actor")
+    return actor
+
+
+def validated_evidence_refresh(payload: dict) -> dict:
+    """Validate the exact refreshed-evidence body: the three graded enum fields.
+
+    Rejects unknown/extra/missing keys, non-string types, and unsupported enum
+    values without coercion, failing closed with a stable code and no write.
+    """
+    if not isinstance(payload, dict):
+        raise RequestRejected(HTTPStatus.BAD_REQUEST, "invalid_payload")
+    keys = set(payload)
+    allowed = set(EVIDENCE_REFRESH_SPEC)
+    if keys - allowed:
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "unknown_field")
+    if allowed - keys:
+        raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "missing_field")
+    out = {}
+    for field, allowed_values in EVIDENCE_REFRESH_SPEC.items():
+        value = payload[field]
+        if not isinstance(value, str):
+            raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_field")
+        if value not in allowed_values:
+            raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "unsupported_enum")
+        out[field] = value
+    return out
+
+
 def parse_profile_id(segment: str) -> int:
     """Parse a URL path id strictly: ASCII digits, no leading zero, bounded, >= 1.
 
@@ -518,8 +579,14 @@ def _profile_view(profile: sqlite3.Row) -> dict:
 
 
 def load_profile(profile_id: int) -> dict | None:
-    """Read one tenant-scoped profile with its constituents and live evaluation."""
+    """Read one tenant-scoped profile with its constituents and live evaluation.
+
+    All compound reads run inside one explicit read snapshot (a single BEGIN..COMMIT
+    on this connection) so the profile, its intrinsic evaluation, the latest advisory
+    decision, the repair task, and the event trail cannot mix different commits.
+    """
     with get_db() as con:
+        con.execute("BEGIN")  # one consistent read snapshot for the whole read model
         profile = con.execute(
             "SELECT * FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (profile_id, TENANT_ID)
         ).fetchone()
@@ -528,19 +595,41 @@ def load_profile(profile_id: int) -> dict | None:
         endpoint = con.execute("SELECT * FROM settlement_endpoints WHERE id = ?", (profile["endpoint_id"],)).fetchone()
         entity = con.execute("SELECT * FROM legal_entities WHERE id = ?", (endpoint["legal_entity_id"],)).fetchone()
         institution = con.execute("SELECT * FROM institutions WHERE id = ?", (entity["institution_id"],)).fetchone()
+        # SEC-P30: the versioned advisory-decision history and current repair task,
+        # so a prior decision and its immutable evidence stay queryable.
+        decisions = _load_decisions(con, profile["id"])
+        # The intrinsic evaluation is computed live from the IMMUTABLE constituent
+        # fields and stays separately available and unchanged by any repair.
+        evaluation = evaluate(profile_rule_input(entity, endpoint))
+        # The latest versioned decision is promoted as the explicit advisory result;
+        # when none has been recorded the advisory verdict is the intrinsic one.
+        latest_decision = decisions[-1] if decisions else None
         return {
             "profile": _profile_view(profile),
             "institution": row_dict(institution),
             "legal_entity": row_dict(entity),
             "endpoint": row_dict(endpoint),
-            "evaluation": evaluate(profile_rule_input(entity, endpoint)),
+            "evaluation": evaluation,
+            # The explicit latest advisory decision and its promoted verdict.
+            "latest_decision": latest_decision,
+            "verdict": latest_decision["verdict"] if latest_decision else evaluation["decision"]["verdict"],
+            "decisions": decisions,
+            "repair": _load_current_repair(con, profile["id"]),
+            # The append-only, ordered repair-event trail for this profile.
+            "repair_events": _load_repair_events(con, profile["id"]),
             "boundary": "synthetic_data_only_no_external_network_calls",
         }
 
 
 def list_profiles() -> list[dict]:
-    """List every tenant-scoped profile with its lifecycle state and live verdict."""
+    """List every tenant-scoped profile with its lifecycle state and advisory verdict.
+
+    The read runs inside one explicit snapshot; the ``verdict`` is promoted from each
+    profile's latest versioned decision when one exists, so a HOLD profile revalidated
+    to ALLOW reports ALLOW here, while the intrinsic evaluation is never rewritten.
+    """
     with get_db() as con:
+        con.execute("BEGIN")  # one consistent read snapshot across every profile row
         profiles = con.execute(
             "SELECT * FROM endpoint_profiles WHERE tenant_id = ? ORDER BY id", (TENANT_ID,)
         ).fetchall()
@@ -550,6 +639,10 @@ def list_profiles() -> list[dict]:
             entity = con.execute("SELECT * FROM legal_entities WHERE id = ?", (endpoint["legal_entity_id"],)).fetchone()
             institution = con.execute("SELECT * FROM institutions WHERE id = ?", (entity["institution_id"],)).fetchone()
             evaluation = evaluate(profile_rule_input(entity, endpoint))
+            latest = con.execute(
+                "SELECT verdict FROM profile_decisions WHERE profile_id = ? AND tenant_id = ? ORDER BY version DESC LIMIT 1",
+                (profile["id"], TENANT_ID),
+            ).fetchone()
             items.append({
                 "id": profile["id"],
                 "lifecycle_state": profile["lifecycle_state"],
@@ -558,7 +651,9 @@ def list_profiles() -> list[dict]:
                 "bic": institution["bic"],
                 "lei": entity["lei"],
                 "uetr": endpoint["uetr"],
-                "verdict": evaluation["decision"]["verdict"],
+                # Promoted advisory verdict: the latest versioned decision if any,
+                # else the intrinsic evaluation verdict.
+                "verdict": latest["verdict"] if latest else evaluation["decision"]["verdict"],
                 "created_at": profile["created_at"],
                 "updated_at": profile["updated_at"],
             })
@@ -710,6 +805,17 @@ def supersede_profile(profile_id: int, replacement_id: int) -> dict | None:
                 return None
             if active["lifecycle_state"] != LIFECYCLE_ACTIVE:
                 raise RequestRejected(HTTPStatus.CONFLICT, "invalid_transition")
+            # A profile with a live (non-resolved) repair cannot be superseded: it
+            # must be impossible to both supersede a profile and leave/advance a live
+            # repair on it. The refresh/revalidate steps re-check active state in
+            # their own transactions, so the two directions cannot interleave. This
+            # read shares the supersession's BEGIN IMMEDIATE lock.
+            live_repair = con.execute(
+                "SELECT 1 FROM repair_tasks WHERE profile_id = ? AND tenant_id = ? AND state <> ? LIMIT 1",
+                (profile_id, TENANT_ID, REPAIR_RESOLVED),
+            ).fetchone()
+            if live_repair:
+                raise RequestRejected(HTTPStatus.CONFLICT, "repair_in_progress")
             if replacement_id == profile_id:
                 raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_replacement")
             replacement = con.execute(
@@ -732,6 +838,306 @@ def supersede_profile(profile_id: int, replacement_id: int) -> dict | None:
             "profile": load_profile(profile_id),
             "replacement": load_profile(replacement_id),
         }
+
+
+# --- Repair / versioned-decision workflow (SEC-P30) -------------------------
+# open -> evidence refresh -> revalidation over an ACTIVE profile. Each step is a
+# BEGIN IMMEDIATE transaction so the state check and the write are serialized and
+# roll back together. The active profile aggregate is never mutated: refreshed
+# evidence is persisted on the repair task and the superseding decision is
+# computed from it, so SEC-P20 immutability is preserved. Every query is scoped
+# through the server-owned tenant, so a cross-profile step cannot reach another
+# profile's task or decision.
+
+
+def _decision_view(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "profile_id": row["profile_id"],
+        "version": row["version"],
+        "previous_decision_id": row["previous_decision_id"],
+        "origin": row["origin"],
+        "verdict": row["verdict"],
+        "token_class": row["token_class"],
+        "fiat_class": row["fiat_class"],
+        "token_text": row["token_text"],
+        "fiat_text": row["fiat_text"],
+        "repair_text": row["repair_text"],
+        "evidence": {
+            "authority_status": row["evidence_authority_status"],
+            "allowlist_status": row["evidence_allowlist_status"],
+            "endpoint_payload_status": row["evidence_payload_status"],
+        },
+        "created_at": row["created_at"],
+    }
+
+
+def _repair_view(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "profile_id": row["profile_id"],
+        "actor": row["actor"],
+        "state": row["state"],
+        "opened_decision_id": row["opened_decision_id"],
+        "resolved_decision_id": row["resolved_decision_id"],
+        "refreshed_evidence": {
+            "authority_status": row["refreshed_authority_status"],
+            "allowlist_status": row["refreshed_allowlist_status"],
+            "endpoint_payload_status": row["refreshed_payload_status"],
+        },
+        "created_at": row["created_at"],
+        "evidence_refreshed_at": row["evidence_refreshed_at"],
+        "resolved_at": row["resolved_at"],
+    }
+
+
+def _event_view(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "profile_id": row["profile_id"],
+        "task_id": row["task_id"],
+        "sequence": row["sequence"],
+        "event_type": row["event_type"],
+        "actor": row["actor"],
+        "decision_id": row["decision_id"],
+        "created_at": row["created_at"],
+    }
+
+
+def _load_decisions(con: sqlite3.Connection, profile_id: int) -> list[dict]:
+    rows = con.execute(
+        "SELECT * FROM profile_decisions WHERE profile_id = ? AND tenant_id = ? ORDER BY version",
+        (profile_id, TENANT_ID),
+    ).fetchall()
+    return [_decision_view(row) for row in rows]
+
+
+def _load_repair_events(con: sqlite3.Connection, profile_id: int) -> list[dict]:
+    """The profile's append-only repair-event trail, in append (id) order."""
+    rows = con.execute(
+        "SELECT * FROM repair_events WHERE profile_id = ? AND tenant_id = ? ORDER BY id",
+        (profile_id, TENANT_ID),
+    ).fetchall()
+    return [_event_view(row) for row in rows]
+
+
+def _append_repair_event(con: sqlite3.Connection, profile_id: int, task_id: int, sequence: int, event_type: str, actor: str, decision_id, now: str) -> None:
+    """Append exactly one immutable repair event within the caller's transaction."""
+    con.execute(
+        "INSERT INTO repair_events(tenant_id, profile_id, task_id, sequence, event_type, actor, decision_id, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        (TENANT_ID, profile_id, task_id, sequence, event_type, actor, decision_id, now),
+    )
+
+
+def _load_current_repair(con: sqlite3.Connection, profile_id: int) -> dict | None:
+    """The profile's most recent repair task (live one first, else last resolved)."""
+    row = con.execute(
+        "SELECT * FROM repair_tasks WHERE profile_id = ? AND tenant_id = ? ORDER BY id DESC LIMIT 1",
+        (profile_id, TENANT_ID),
+    ).fetchone()
+    return _repair_view(row) if row else None
+
+
+def _insert_decision(con: sqlite3.Connection, profile_id: int, version: int, previous_id, origin: str, decision: dict, rule_input: dict, now: str) -> int:
+    """Append one immutable decision row with its evidence snapshot."""
+    return con.execute(
+        "INSERT INTO profile_decisions(tenant_id, profile_id, version, previous_decision_id, origin,"
+        " verdict, token_class, fiat_class, token_text, fiat_text, repair_text,"
+        " evidence_authority_status, evidence_allowlist_status, evidence_payload_status, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            TENANT_ID, profile_id, version, previous_id, origin,
+            decision["verdict"], decision["token_class"], decision["fiat_class"],
+            decision["token_text"], decision["fiat_text"], decision["repair_text"],
+            rule_input["authority_status"], rule_input["allowlist_status"], rule_input["payload_status"], now,
+        ),
+    ).lastrowid
+
+
+def _profile_constituents(con: sqlite3.Connection, profile: sqlite3.Row) -> tuple:
+    endpoint = con.execute("SELECT * FROM settlement_endpoints WHERE id = ?", (profile["endpoint_id"],)).fetchone()
+    entity = con.execute("SELECT * FROM legal_entities WHERE id = ?", (endpoint["legal_entity_id"],)).fetchone()
+    return entity, endpoint
+
+
+def open_repair_task(profile_id: int, actor: str) -> dict | None:
+    """Open a repair task on an ACTIVE profile whose latest decision needs repair.
+
+    The first ever repair records the profile's current (failing) evaluation as
+    the baseline decision v1; a later repair reuses the latest recorded decision.
+    An already-approved latest decision has nothing to repair and fails closed
+    with no write. A live repair task already exists is a replay conflict.
+    """
+    with get_db() as con:
+        try:
+            with con:
+                con.execute("BEGIN IMMEDIATE")
+                # Capture the step timestamp only AFTER the write lock is held, so a
+                # later-committing step under contention cannot persist an earlier one.
+                now = utc_now()
+                profile = con.execute(
+                    "SELECT * FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (profile_id, TENANT_ID)
+                ).fetchone()
+                if not profile:
+                    return None
+                if profile["lifecycle_state"] != LIFECYCLE_ACTIVE:
+                    raise RequestRejected(HTTPStatus.CONFLICT, "invalid_transition")
+                live = con.execute(
+                    "SELECT 1 FROM repair_tasks WHERE profile_id = ? AND tenant_id = ? AND state <> ? LIMIT 1",
+                    (profile_id, TENANT_ID, REPAIR_RESOLVED),
+                ).fetchone()
+                if live:
+                    raise RequestRejected(HTTPStatus.CONFLICT, "repair_already_open")
+                latest = con.execute(
+                    "SELECT * FROM profile_decisions WHERE profile_id = ? AND tenant_id = ? ORDER BY version DESC LIMIT 1",
+                    (profile_id, TENANT_ID),
+                ).fetchone()
+                if latest is None:
+                    entity, endpoint = _profile_constituents(con, profile)
+                    rule_input = profile_rule_input(entity, endpoint)
+                    decision = evaluate(rule_input)["decision"]
+                    if decision["verdict"] == APPROVED_VERDICT:
+                        raise RequestRejected(HTTPStatus.CONFLICT, "nothing_to_repair")
+                    opened_decision_id = _insert_decision(con, profile_id, 1, None, DECISION_BASELINE, decision, rule_input, now)
+                else:
+                    if latest["verdict"] == APPROVED_VERDICT:
+                        raise RequestRejected(HTTPStatus.CONFLICT, "nothing_to_repair")
+                    opened_decision_id = latest["id"]
+                task_id = con.execute(
+                    "INSERT INTO repair_tasks(tenant_id, profile_id, actor, state, opened_decision_id, created_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (TENANT_ID, profile_id, actor, REPAIR_OPEN, opened_decision_id, now),
+                ).lastrowid
+                _append_repair_event(
+                    con, profile_id, task_id, EVENT_SEQ_OPEN, EVENT_REPAIR_OPENED, actor, opened_decision_id, now
+                )
+                # Assemble the receipt from exact ids on this connection, before the
+                # transaction commits, so a concurrent cycle cannot alter it.
+                result = _repair_step_response(con, profile_id, task_id, opened_decision_id, "repair_opened")
+        except sqlite3.IntegrityError:
+            # A concurrent open racing the partial UNIQUE guard: fail closed.
+            raise RequestRejected(HTTPStatus.CONFLICT, "repair_already_open")
+        return result
+
+
+def refresh_repair_evidence(profile_id: int, evidence: dict) -> dict | None:
+    """Persist refreshed evidence onto an OPEN repair task (open -> refreshed)."""
+    with get_db() as con:
+        with con:
+            con.execute("BEGIN IMMEDIATE")
+            # Capture the step timestamp only AFTER the write lock is held, so a
+            # later-committing step under contention cannot persist an earlier one.
+            now = utc_now()
+            profile = con.execute(
+                "SELECT lifecycle_state FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (profile_id, TENANT_ID)
+            ).fetchone()
+            if not profile:
+                return None
+            # Recheck active state inside this transaction: a repair may never be
+            # advanced on a profile that is no longer active (fail closed otherwise).
+            if profile["lifecycle_state"] != LIFECYCLE_ACTIVE:
+                raise RequestRejected(HTTPStatus.CONFLICT, "invalid_transition")
+            task = con.execute(
+                "SELECT * FROM repair_tasks WHERE profile_id = ? AND tenant_id = ? AND state <> ? ORDER BY id DESC LIMIT 1",
+                (profile_id, TENANT_ID, REPAIR_RESOLVED),
+            ).fetchone()
+            if not task:
+                raise RequestRejected(HTTPStatus.CONFLICT, "no_open_repair")
+            if task["state"] != REPAIR_OPEN:
+                raise RequestRejected(HTTPStatus.CONFLICT, "invalid_repair_state")
+            con.execute(
+                "UPDATE repair_tasks SET state = ?, refreshed_authority_status = ?, refreshed_allowlist_status = ?,"
+                " refreshed_payload_status = ?, evidence_refreshed_at = ? WHERE id = ?",
+                (
+                    REPAIR_EVIDENCE_REFRESHED, evidence["authority_status"], evidence["allowlist_status"],
+                    evidence["endpoint_payload_status"], now, task["id"],
+                ),
+            )
+            _append_repair_event(
+                con, profile_id, task["id"], EVENT_SEQ_EVIDENCE, EVENT_EVIDENCE_REFRESHED, task["actor"], None, now
+            )
+            result = _repair_step_response(con, profile_id, task["id"], task["opened_decision_id"], "evidence_refreshed")
+        return result
+
+
+def revalidate_repair(profile_id: int) -> dict | None:
+    """Recompute the decision from refreshed evidence and record it (refreshed -> resolved).
+
+    The superseding decision is version N+1 linked to the repaired baseline; the
+    repair task resolves to it. Computed solely from the refreshed persisted
+    evidence plus the profile's immutable fallback/structure.
+    """
+    with get_db() as con:
+        with con:
+            con.execute("BEGIN IMMEDIATE")
+            # Capture the step timestamp only AFTER the write lock is held, so a
+            # later-committing step under contention cannot persist an earlier one.
+            now = utc_now()
+            profile = con.execute(
+                "SELECT * FROM endpoint_profiles WHERE id = ? AND tenant_id = ?", (profile_id, TENANT_ID)
+            ).fetchone()
+            if not profile:
+                return None
+            # Recheck active state inside this transaction: revalidation may never
+            # record a decision on a profile that is no longer active.
+            if profile["lifecycle_state"] != LIFECYCLE_ACTIVE:
+                raise RequestRejected(HTTPStatus.CONFLICT, "invalid_transition")
+            task = con.execute(
+                "SELECT * FROM repair_tasks WHERE profile_id = ? AND tenant_id = ? AND state <> ? ORDER BY id DESC LIMIT 1",
+                (profile_id, TENANT_ID, REPAIR_RESOLVED),
+            ).fetchone()
+            if not task:
+                raise RequestRejected(HTTPStatus.CONFLICT, "no_open_repair")
+            if task["state"] != REPAIR_EVIDENCE_REFRESHED:
+                raise RequestRejected(HTTPStatus.CONFLICT, "invalid_repair_state")
+            entity, endpoint = _profile_constituents(con, profile)
+            rule_input = profile_rule_input(entity, endpoint)
+            rule_input["authority_status"] = task["refreshed_authority_status"]
+            rule_input["allowlist_status"] = task["refreshed_allowlist_status"]
+            rule_input["payload_status"] = task["refreshed_payload_status"]
+            decision = evaluate(rule_input)["decision"]
+            opened = con.execute(
+                "SELECT version FROM profile_decisions WHERE id = ? AND tenant_id = ?",
+                (task["opened_decision_id"], TENANT_ID),
+            ).fetchone()
+            new_version = opened["version"] + 1
+            new_decision_id = _insert_decision(
+                con, profile_id, new_version, task["opened_decision_id"], DECISION_REVALIDATION, decision, rule_input, now
+            )
+            con.execute(
+                "UPDATE repair_tasks SET state = ?, resolved_decision_id = ?, resolved_at = ? WHERE id = ?",
+                (REPAIR_RESOLVED, new_decision_id, now, task["id"]),
+            )
+            _append_repair_event(
+                con, profile_id, task["id"], EVENT_SEQ_REVALIDATION, EVENT_REVALIDATED, task["actor"], new_decision_id, now
+            )
+            result = _repair_step_response(con, profile_id, task["id"], new_decision_id, "revalidated")
+        return result
+
+
+def _repair_step_response(con: sqlite3.Connection, profile_id: int, task_id: int, decision_id: int, status: str) -> dict:
+    """Assemble a repair-step receipt from EXACT ids on the mutating connection.
+
+    Called inside the mutation's own BEGIN IMMEDIATE transaction, before commit, so
+    every part of the receipt is read from the same snapshot as the write. The task
+    is selected by its exact id (never "the newest task") and the concerned decision
+    by its exact id, so a concurrent next repair cycle can never make a receipt
+    report a later generation's task or a null/wrong decision. The returned dict is
+    plain Python, detached from the DB, so returning it after commit is safe.
+    """
+    task_row = con.execute(
+        "SELECT * FROM repair_tasks WHERE id = ? AND tenant_id = ?", (task_id, TENANT_ID)
+    ).fetchone()
+    decisions = _load_decisions(con, profile_id)
+    decision = next((d for d in decisions if d["id"] == decision_id), None)
+    return {
+        "status": status,
+        "repair_task": _repair_view(task_row) if task_row else None,
+        "decision": decision,
+        "decisions": decisions,
+        "repair_events": _load_repair_events(con, profile_id),
+    }
 
 
 # --- Structured local request/error logging (SEC-O20) -----------------------
@@ -773,6 +1179,12 @@ def normalized_route(raw_target: str) -> str:
         return "/api/endpoint-profiles/{id}/activation"
     if path.startswith("/api/endpoint-profiles/") and path.endswith("/supersession") and segments == 4:
         return "/api/endpoint-profiles/{id}/supersession"
+    if path.startswith("/api/endpoint-profiles/") and path.endswith("/repair/evidence") and segments == 5:
+        return "/api/endpoint-profiles/{id}/repair/evidence"
+    if path.startswith("/api/endpoint-profiles/") and path.endswith("/repair/revalidation") and segments == 5:
+        return "/api/endpoint-profiles/{id}/repair/revalidation"
+    if path.startswith("/api/endpoint-profiles/") and path.endswith("/repair") and segments == 4:
+        return "/api/endpoint-profiles/{id}/repair"
     if path.startswith("/api/endpoint-profiles/") and segments == 3:
         return "/api/endpoint-profiles/{id}"
     return "/{other}"
@@ -993,6 +1405,51 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "profile_not_found"}, HTTPStatus.NOT_FOUND)
                 else:
                     self.send_json(result)
+            elif path.startswith("/api/endpoint-profiles/") and path.endswith("/repair/evidence"):
+                parts = path.split("/")
+                if len(parts) != 6:
+                    self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                require_json_content_type(self.headers)
+                require_allowed_origin(self.headers)
+                profile_id = parse_profile_id(parts[3])
+                evidence = validated_evidence_refresh(read_json_object(self, MAX_ACTION_BODY_BYTES))
+                result = refresh_repair_evidence(profile_id, evidence)
+                if result is None:
+                    self.send_json({"error": "profile_not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self.send_json(result)
+            elif path.startswith("/api/endpoint-profiles/") and path.endswith("/repair/revalidation"):
+                parts = path.split("/")
+                if len(parts) != 6:
+                    self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                require_json_content_type(self.headers)
+                require_allowed_origin(self.headers)
+                profile_id = parse_profile_id(parts[3])
+                # Revalidation takes no parameters; require an empty JSON object so
+                # the strict-json write boundary still applies. Any content is rejected.
+                if read_json_object(self, MAX_ACTION_BODY_BYTES) != {}:
+                    raise RequestRejected(HTTPStatus.UNPROCESSABLE_ENTITY, "unknown_field")
+                result = revalidate_repair(profile_id)
+                if result is None:
+                    self.send_json({"error": "profile_not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self.send_json(result)
+            elif path.startswith("/api/endpoint-profiles/") and path.endswith("/repair"):
+                parts = path.split("/")
+                if len(parts) != 5:
+                    self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                require_json_content_type(self.headers)
+                require_allowed_origin(self.headers)
+                profile_id = parse_profile_id(parts[3])
+                actor = validated_repair_actor(read_json_object(self, MAX_ACTION_BODY_BYTES))
+                result = open_repair_task(profile_id, actor)
+                if result is None:
+                    self.send_json({"error": "profile_not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self.send_json(result, HTTPStatus.CREATED)
             elif path.startswith("/api/scenarios/") and path.endswith("/actions"):
                 parts = path.split("/")
                 if len(parts) != 5:
