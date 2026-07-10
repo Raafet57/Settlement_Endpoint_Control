@@ -9,6 +9,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from evaluator import evaluate
+
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "data" / "demo.sqlite"
 MANIFEST_PATH = ROOT / "source_manifest.json"
@@ -172,15 +174,18 @@ POLICIES = [
 SCENARIOS = {
     "blocked": {
         "row": (1, "blocked", "Blocked wallet endpoint", "blocked_wallet_endpoint", "bad", "fallback selected", "warn", "pre-release", "bad", "blocked", "bad", "fallback selected", 1, "vLEI-style evidence expiring soon", "Stale, refresh required", "Approved custodian, endpoint evidence incomplete", "Treasury ops queue"),
-        "checks": [
-            (1, "good", "BIC and institution shape", "Institution layer is present and reaches fallback SSI holder."),
-            (2, "good", "LEI and counterparty profile", "Legal entity profile is present for the beneficiary."),
-            (3, "warn", "vLEI-style authority evidence", "Authority evidence expires soon and needs refresh before token use."),
-            (4, "bad", "Wallet allowlist freshness", "Allowlist is stale for the requested counterparty and rail."),
-            (5, "bad", "Endpoint-control payload", "Beneficiary wallet-control field is incomplete."),
-            (6, "good", "Fiat SSI fallback", "Fallback route is available and traceable."),
-        ],
-        "decision": (1, "TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED", "blocked", "selected", "Blocked. Wallet allowlist is stale and endpoint-control evidence is incomplete.", "Selected now. The fiat route remains approved and traceable while the digital endpoint is repaired.", "Repair task: refresh wallet allowlist and endpoint authority evidence before using the tokenized route."),
+        "rule_input": {
+            "institution_present": True,
+            "institution_reachable": True,
+            "legal_entity_present": True,
+            "authority_status": "expiring_soon",
+            "allowlist_status": "stale",
+            "payload_status": "incomplete",
+            "fallback_rail": "Fiat SSI route",
+            "fallback_currency": "EUR",
+            "fallback_account_mask": "DE•• •••• •••• 4400",
+            "fallback_intermediary_bic": "INTERDEFFXXX",
+        },
         "audit": [
             ("logged", "Profile loaded", "BIC, LEI/vLEI-style authority, wallet endpoint and fallback SSI loaded."),
             ("logged", "Pre-validation started", "Tokenized deposit route checked before release."),
@@ -192,15 +197,18 @@ SCENARIOS = {
     },
     "refreshed": {
         "row": (2, "refreshed", "Refreshed endpoint approved", "refreshed_endpoint_approved", "good", "token route eligible", "good", "ready", "good", "eligible", "good", "token route approved", 1, "vLEI-style evidence refreshed", "Current for counterparty and rail", "Approved custodian, current evidence attached", "Treasury ops approved"),
-        "checks": [
-            (1, "good", "BIC and institution shape", "Institution layer is present and reaches fallback SSI holder."),
-            (2, "good", "LEI and counterparty profile", "Legal entity profile is present for the beneficiary."),
-            (3, "good", "vLEI-style authority evidence", "Synthetic authority evidence is refreshed."),
-            (4, "good", "Wallet allowlist freshness", "Allowlist is current for this counterparty and rail."),
-            (5, "good", "Endpoint-control payload", "Required synthetic payload is complete."),
-            (6, "good", "Fiat SSI fallback", "Fallback remains available as operational backup."),
-        ],
-        "decision": (2, "TOKEN_ROUTE_APPROVED_FIAT_FALLBACK_RETAINED", "selected", "", "Approved. Wallet allowlist, authority evidence and endpoint-control payload are current.", "Retained as fallback. No immediate route switch required.", "Repair task closed: endpoint evidence is current. Continue monitoring freshness before future releases."),
+        "rule_input": {
+            "institution_present": True,
+            "institution_reachable": True,
+            "legal_entity_present": True,
+            "authority_status": "current",
+            "allowlist_status": "current",
+            "payload_status": "complete",
+            "fallback_rail": "Fiat SSI route",
+            "fallback_currency": "EUR",
+            "fallback_account_mask": "DE•• •••• •••• 4400",
+            "fallback_intermediary_bic": "INTERDEFFXXX",
+        },
         "audit": [
             ("logged", "Profile loaded", "BIC, LEI/vLEI-style authority, wallet endpoint and fallback SSI loaded."),
             ("logged", "Pre-validation started", "Tokenized deposit route checked before release."),
@@ -212,15 +220,18 @@ SCENARIOS = {
     },
     "authority": {
         "row": (3, "authority", "Authority evidence expired", "authority_expired_manual_hold", "warn", "approval hold", "warn", "authority expired", "warn", "hold", "warn", "manual approval hold", 1, "vLEI-style evidence expired in fixture", "Current but authority chain stale", "Approved custodian, approval hold active", "Risk reviewer queue"),
-        "checks": [
-            (1, "good", "BIC and institution shape", "Institution layer is present and reaches fallback SSI holder."),
-            (2, "good", "LEI and counterparty profile", "Legal entity profile is present for the beneficiary."),
-            (3, "bad", "vLEI-style authority evidence", "Authority evidence is expired in this synthetic scenario."),
-            (4, "good", "Wallet allowlist freshness", "Allowlist is current for the requested endpoint."),
-            (5, "warn", "Endpoint-control payload", "Payload complete, but authority chain blocks release."),
-            (6, "good", "Fiat SSI fallback", "Fallback route is available and traceable."),
-        ],
-        "decision": (3, "AUTHORITY_EXPIRED_MANUAL_HOLD", "warned", "selected", "Hold. Endpoint allowlist is current, but authority evidence is expired and requires risk review.", "Selected if settlement must proceed before authority repair.", "Repair task: renew authority evidence or route through fallback with manual approval."),
+        "rule_input": {
+            "institution_present": True,
+            "institution_reachable": True,
+            "legal_entity_present": True,
+            "authority_status": "expired",
+            "allowlist_status": "current",
+            "payload_status": "complete",
+            "fallback_rail": "Fiat SSI route",
+            "fallback_currency": "EUR",
+            "fallback_account_mask": "DE•• •••• •••• 4400",
+            "fallback_intermediary_bic": "INTERDEFFXXX",
+        },
         "audit": [
             ("logged", "Profile loaded", "BIC, LEI/vLEI-style authority, wallet endpoint and fallback SSI loaded."),
             ("logged", "Pre-validation started", "Authority chain and endpoint controls checked."),
@@ -296,16 +307,17 @@ def seed() -> dict[str, int | str]:
                     scenario["row"],
                 )
                 scenario_id = scenario["row"][0]
-                for order, (policy_id, status, name, detail) in enumerate(scenario["checks"], start=1):
+                evaluation = evaluate(scenario["rule_input"])
+                for order, check in enumerate(evaluation["checks"], start=1):
                     con.execute(
                         "INSERT INTO policy_checks(id, scenario_id, policy_id, display_order, status, name, detail) VALUES (?,?,?,?,?,?,?)",
-                        (check_id, scenario_id, policy_id, order, status, name, detail),
+                        (check_id, scenario_id, order, order, check["status"], check["name"], check["detail"]),
                     )
                     check_id += 1
-                decision_id, verdict, token_class, fiat_class, token_text, fiat_text, repair_text = scenario["decision"]
+                decision = evaluation["decision"]
                 con.execute(
                     "INSERT INTO route_decisions(id, scenario_id, verdict, token_class, fiat_class, token_text, fiat_text, repair_text, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (decision_id, scenario_id, verdict, token_class, fiat_class, token_text, fiat_text, repair_text, fixed_time),
+                    (scenario_id, scenario_id, decision["verdict"], decision["token_class"], decision["fiat_class"], decision["token_text"], decision["fiat_text"], decision["repair_text"], fixed_time),
                 )
                 for order, (event_type, title, detail) in enumerate(scenario["audit"], start=1):
                     con.execute(
