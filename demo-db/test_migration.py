@@ -2117,6 +2117,40 @@ class RepairRowIntegrityValidationTests(TempDbTestCase):
             con.execute("UPDATE repair_tasks SET refreshed_payload_status='incomplete' WHERE id=1")
         self._assert_fails_closed(self._current_v6_with_chain("rows_eval_inconsistent.sqlite", corrupt=corrupt))
 
+    def test_missing_profile_constituent_fails_closed_stably(self):
+        # A current-schema decision chain whose endpoint's legal entity disappeared
+        # must raise the stable MigrationError contract, never leak a TypeError from
+        # indexing a missing JOIN result.
+        def corrupt(con):
+            con.execute("DELETE FROM legal_entities WHERE id=1")
+        self._assert_fails_closed(
+            self._current_v6_with_chain("rows_missing_constituent.sqlite", corrupt=corrupt)
+        )
+
+    def test_noncanonical_repair_timestamps_fail_closed(self):
+        # Lexically equal arbitrary text is not an audit timestamp. Corrupt every
+        # linked step consistently so only canonical UTC parsing can reject it.
+        def corrupt(con):
+            con.execute("UPDATE profile_decisions SET created_at='not-a-timestamp'")
+            con.execute(
+                "UPDATE repair_tasks SET created_at='not-a-timestamp',"
+                " evidence_refreshed_at='not-a-timestamp', resolved_at='not-a-timestamp'"
+            )
+            con.execute("UPDATE repair_events SET created_at='not-a-timestamp'")
+        self._assert_fails_closed(
+            self._current_v6_with_chain("rows_noncanonical_timestamps.sqlite", corrupt=corrupt)
+        )
+
+    def test_empty_actor_domain_fails_closed_even_when_events_match(self):
+        # Task/event equality alone does not provide accountable provenance: the
+        # actor must be one of the synthetic actors accepted by the API boundary.
+        def corrupt(con):
+            con.execute("UPDATE repair_tasks SET actor='' WHERE id=1")
+            con.execute("UPDATE repair_events SET actor='' WHERE task_id=1")
+        self._assert_fails_closed(
+            self._current_v6_with_chain("rows_empty_actor.sqlite", corrupt=corrupt)
+        )
+
     # -- live repair must sit on an active profile (SEC-P30 blocker 2) ------------
 
     def test_live_task_on_non_active_profile_fails_closed(self):

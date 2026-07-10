@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from pathlib import Path
 from unittest import mock
 
 import app
+import migrate
 import seed
 
 ROOT = Path(__file__).resolve().parent
@@ -297,6 +299,78 @@ class RepairHappyPathTests(_RepairServerCase):
         self.assertEqual(v3["version"], 3)
         self.assertEqual(v3["verdict"], APPROVED)
         self.assertEqual([d["version"] for d in vp["decisions"]], [1, 2, 3])
+
+    def test_reads_order_cycles_logically_when_primary_keys_are_reversed(self) -> None:
+        # Primary keys are opaque identifiers, not chronology. Build two legal
+        # cycles, then reverse task/event id order in a synthetic corruption seam.
+        # Current repair and event history must still follow decision version and
+        # per-task sequence rather than integer id order.
+        pid = self.active_needs_repair(3008, allowlist="stale")
+        self.open_repair(pid)
+        self.refresh_evidence(
+            pid, authority_status="expired", allowlist_status="current",
+            endpoint_payload_status="complete",
+        )
+        self.revalidate(pid)  # v2 HOLD
+        self.open_repair(pid)
+        self.refresh_evidence(
+            pid, authority_status="current", allowlist_status="current",
+            endpoint_payload_status="complete",
+        )
+        self.revalidate(pid)  # v3 APPROVED
+
+        con = sqlite3.connect(app.DB_PATH)
+        try:
+            con.execute("PRAGMA foreign_keys=OFF")
+            tasks = con.execute(
+                "SELECT rt.id FROM repair_tasks rt "
+                "JOIN profile_decisions d ON d.id=rt.opened_decision_id "
+                "WHERE rt.profile_id=? ORDER BY d.version", (pid,),
+            ).fetchall()
+            self.assertEqual(len(tasks), 2)
+            first_id, second_id = tasks[0][0], tasks[1][0]
+            task_base = con.execute("SELECT COALESCE(MAX(id),0) FROM repair_tasks").fetchone()[0] + 10
+            first_tmp, second_tmp = -task_base - 1, -task_base - 2
+            con.execute("UPDATE repair_events SET task_id=? WHERE task_id=?", (first_tmp, first_id))
+            con.execute("UPDATE repair_tasks SET id=? WHERE id=?", (first_tmp, first_id))
+            con.execute("UPDATE repair_events SET task_id=? WHERE task_id=?", (second_tmp, second_id))
+            con.execute("UPDATE repair_tasks SET id=? WHERE id=?", (second_tmp, second_id))
+            # Earlier cycle receives the larger id; latest cycle receives smaller.
+            con.execute("UPDATE repair_tasks SET id=? WHERE id=?", (task_base + 2, first_tmp))
+            con.execute("UPDATE repair_events SET task_id=? WHERE task_id=?", (task_base + 2, first_tmp))
+            con.execute("UPDATE repair_tasks SET id=? WHERE id=?", (task_base + 1, second_tmp))
+            con.execute("UPDATE repair_events SET task_id=? WHERE task_id=?", (task_base + 1, second_tmp))
+
+            event_rows = con.execute(
+                "SELECT id FROM repair_events WHERE profile_id=?", (pid,)
+            ).fetchall()
+            event_base = con.execute("SELECT COALESCE(MAX(id),0) FROM repair_events").fetchone()[0] + 10
+            for (event_id,) in event_rows:
+                con.execute("UPDATE repair_events SET id=? WHERE id=?", (-event_base - event_id, event_id))
+            # Latest cycle receives lower event ids than the earlier cycle.
+            for cycle_offset, task_id in enumerate((task_base + 1, task_base + 2)):
+                rows = con.execute(
+                    "SELECT id, sequence FROM repair_events WHERE task_id=? ORDER BY sequence", (task_id,)
+                ).fetchall()
+                for event_id, sequence in rows:
+                    con.execute(
+                        "UPDATE repair_events SET id=? WHERE id=?",
+                        (event_base + cycle_offset * 3 + sequence, event_id),
+                    )
+            con.commit()
+        finally:
+            con.close()
+
+        self.assertEqual(migrate.migrate(app.DB_PATH)["status"], "already_current")
+        profile = self.read_profile(pid)
+        decisions = profile["decisions"]
+        self.assertEqual(profile["repair"]["opened_decision_id"], decisions[1]["id"])
+        self.assertEqual(profile["repair"]["resolved_decision_id"], decisions[2]["id"])
+        self.assertEqual([e["sequence"] for e in profile["repair_events"]], [1, 2, 3, 1, 2, 3])
+        self.assertEqual(
+            [e["task_id"] for e in profile["repair_events"]],
+            [task_base + 2] * 3 + [task_base + 1] * 3,
+        )
 
 
 class RepairInvalidTransitionTests(_RepairServerCase):

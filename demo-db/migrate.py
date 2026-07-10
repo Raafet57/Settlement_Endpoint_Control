@@ -54,6 +54,11 @@ SYNTHETIC_TENANT_ID = "synthetic-demo"
 REFRESHED_AUTHORITY_STATES = ("current", "expiring_soon", "expired")
 REFRESHED_ALLOWLIST_STATES = ("current", "stale")
 REFRESHED_PAYLOAD_STATES = ("complete", "incomplete")
+# Synthetic actor identities accepted by the localhost API. Current-row
+# validation mirrors that boundary so a matching-but-empty/unknown task/event
+# actor cannot masquerade as accountable provenance.
+REPAIR_ACTORS = ("demo_operator", "ops_analyst")
+AUDIT_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 # The foundation step (3 -> 4): introduce the migration ledger + explicit version
 # markers. Metadata only; no business table is created, altered, or dropped.
@@ -62,9 +67,10 @@ FOUNDATION_MIGRATION_NAME = "foundation_schema_migrations_ledger"
 # and backfill one active profile per existing settlement endpoint. Additive
 # only; no existing business row is altered or dropped.
 PROFILES_MIGRATION_NAME = "endpoint_profiles_registry"
-# The repair/decision step (5 -> 6): add the profile_decisions ledger and the
-# repair_tasks workflow table. Additive only -- two empty tables; no existing
-# business row is created, read for mutation, altered, or dropped.
+# The repair/decision step (5 -> 6): add the profile_decisions ledger,
+# repair_tasks workflow, and repair_events audit trail. Additive only -- three
+# empty tables; no existing business row is created, read for mutation, altered,
+# or dropped.
 REPAIR_DECISIONS_MIGRATION_NAME = "endpoint_repair_decisions"
 
 SCHEMA_MIGRATIONS_DDL = """
@@ -580,10 +586,10 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
                 f"a {table} row is scoped to a tenant other than the server-owned tenant",
             )
 
-    # (b) Evidence/event enum domains. The DDL constrains evidence presence per
-    # state but not the value set, so a stored status outside the evaluator's
-    # supported domain -- or an unknown event kind -- is a corrupt row a per-row
-    # CHECK cannot catch.
+    # (b) Evidence/event/actor enum domains. The DDL constrains evidence presence
+    # per state but not the value set, so a stored status or actor outside the API
+    # domain -- or an unknown event kind -- is a corrupt row a per-row CHECK cannot
+    # catch.
     def _reject_unknown_enum(table, column, allowed, *, nullable=False, extra=""):
         members = ",".join("?" for _ in allowed)
         if nullable:
@@ -594,6 +600,20 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
             clause = f"({clause}) AND {extra}"
         if con.execute(f"SELECT COUNT(*) FROM {table} WHERE {clause}", tuple(allowed)).fetchone()[0]:
             raise MigrationError("inconsistent_version", f"a {table} row has an unsupported {column} value")
+
+    def _parse_audit_timestamp(value, label):
+        """Return a parsed canonical second-resolution UTC timestamp or fail closed."""
+        if not isinstance(value, str):
+            raise MigrationError("inconsistent_version", f"{label} is not a canonical UTC timestamp")
+        try:
+            parsed = datetime.strptime(value, AUDIT_TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise MigrationError(
+                "inconsistent_version", f"{label} is not a canonical UTC timestamp"
+            ) from exc
+        if parsed.strftime(AUDIT_TIMESTAMP_FORMAT) != value:
+            raise MigrationError("inconsistent_version", f"{label} is not a canonical UTC timestamp")
+        return parsed
 
     # Refreshed (revalidation-origin) decision evidence is restricted to the exact
     # evaluator-supported enum sets. A baseline decision instead snapshots the
@@ -607,7 +627,9 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
     _reject_unknown_enum("repair_tasks", "refreshed_authority_status", REFRESHED_AUTHORITY_STATES, nullable=True)
     _reject_unknown_enum("repair_tasks", "refreshed_allowlist_status", REFRESHED_ALLOWLIST_STATES, nullable=True)
     _reject_unknown_enum("repair_tasks", "refreshed_payload_status", REFRESHED_PAYLOAD_STATES, nullable=True)
+    _reject_unknown_enum("repair_tasks", "actor", REPAIR_ACTORS)
     _reject_unknown_enum("repair_events", "event_type", ("repair_opened", "evidence_refreshed", "revalidated"))
+    _reject_unknown_enum("repair_events", "actor", REPAIR_ACTORS)
 
     # Load the three (small, synthetic) tables once for the relational checks. The
     # full decision output and evidence snapshot are loaded too, so the stored
@@ -622,6 +644,7 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
             },
             "evidence": {"authority_status": r[12], "allowlist_status": r[13], "payload_status": r[14]},
             "created_at": r[15],
+            "created_at_dt": _parse_audit_timestamp(r[15], "a profile_decisions.created_at value"),
         }
         for r in con.execute(
             "SELECT id, tenant_id, profile_id, version, previous_decision_id, origin,"
@@ -709,7 +732,7 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
         # (intrinsic_authority, intrinsic_allowlist, intrinsic_payload, rail,
         # currency, mask, bic) for a profile's immutable constituent rows.
         if profile_id not in constituents_cache:
-            constituents_cache[profile_id] = con.execute(
+            row = con.execute(
                 "SELECT le.authority_status, se.allowlist_status, se.endpoint_payload_status,"
                 " se.fallback_rail, se.fallback_currency, se.fallback_account_mask, se.fallback_intermediary_bic"
                 " FROM endpoint_profiles ep"
@@ -718,6 +741,12 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
                 " WHERE ep.id = ?",
                 (profile_id,),
             ).fetchone()
+            if row is None:
+                raise MigrationError(
+                    "inconsistent_version",
+                    "a profile decision references missing endpoint or legal-entity constituent data",
+                )
+            constituents_cache[profile_id] = row
         return constituents_cache[profile_id]
 
     def _evaluator_input(constituents, authority, allowlist, payload):
@@ -765,10 +794,21 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
     live_per_profile = {}
     for (tid, tenant, profile_id, actor, state, opened_id, resolved_id,
          auth, allow, payload, created_at, refreshed_at, resolved_at) in tasks:
+        created_at_dt = _parse_audit_timestamp(created_at, "a repair_tasks.created_at value")
+        refreshed_at_dt = (
+            _parse_audit_timestamp(refreshed_at, "a repair_tasks.evidence_refreshed_at value")
+            if refreshed_at is not None else None
+        )
+        resolved_at_dt = (
+            _parse_audit_timestamp(resolved_at, "a repair_tasks.resolved_at value")
+            if resolved_at is not None else None
+        )
         task_by_id[tid] = {
             "id": tid, "profile_id": profile_id, "tenant_id": tenant, "actor": actor, "state": state,
             "opened_decision_id": opened_id, "resolved_decision_id": resolved_id,
             "created_at": created_at, "evidence_refreshed_at": refreshed_at, "resolved_at": resolved_at,
+            "created_at_dt": created_at_dt, "evidence_refreshed_at_dt": refreshed_at_dt,
+            "resolved_at_dt": resolved_at_dt,
         }
         opened = decision_by_id.get(opened_id)
         if opened is None or opened["profile_id"] != profile_id or opened["tenant_id"] != tenant:
@@ -784,23 +824,23 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
         # task shares that baseline's timestamp exactly; a later repair opens a
         # pre-existing (revalidation) decision and so is recorded at or after it. This
         # is cross-row and per-task timestamp monotonicity alone cannot see it.
-        if created_at is None or opened["created_at"] is None or created_at < opened["created_at"]:
+        if created_at_dt < opened["created_at_dt"]:
             raise MigrationError("inconsistent_version", "a repair task is recorded before the decision it opens")
-        if opened["version"] == 1 and created_at != opened["created_at"]:
+        if opened["version"] == 1 and created_at_dt != opened["created_at_dt"]:
             raise MigrationError("inconsistent_version", "a v1 baseline open is not atomic with its baseline decision")
         refreshed_set = auth is not None and allow is not None and payload is not None
         refreshed_clear = auth is None and allow is None and payload is None
         if state == "open":
             coherent = refreshed_clear and refreshed_at is None and resolved_id is None and resolved_at is None
-            timeline = [created_at]
+            timeline = [created_at_dt]
         elif state == "evidence_refreshed":
             coherent = refreshed_set and refreshed_at is not None and resolved_id is None and resolved_at is None
-            timeline = [created_at, refreshed_at]
+            timeline = [created_at_dt, refreshed_at_dt]
         elif state == "resolved":
             coherent = refreshed_set and refreshed_at is not None and resolved_id is not None and resolved_at is not None
-            timeline = [created_at, refreshed_at, resolved_at]
+            timeline = [created_at_dt, refreshed_at_dt, resolved_at_dt]
         else:  # unreachable once the schema fingerprint holds, but stay fail-closed
-            coherent, timeline = False, [created_at]
+            coherent, timeline = False, [created_at_dt]
         if not coherent:
             raise MigrationError(
                 "inconsistent_version", "a repair task's state and evidence/resolution fields are incoherent"
@@ -826,7 +866,7 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
                     "inconsistent_version",
                     "a resolved task's refreshed evidence does not equal its resolving decision snapshot",
                 )
-            if resolved["created_at"] != resolved_at:
+            if resolved["created_at_dt"] != resolved_at_dt:
                 raise MigrationError(
                     "inconsistent_version",
                     "a resolving decision's timestamp does not equal the task's resolved_at",
@@ -902,13 +942,16 @@ def _validate_repair_row_integrity(con: sqlite3.Connection) -> None:
                 "inconsistent_version", "a repair task's event trail is not the legal prefix for its state"
             )
         decision_for_step = {1: task["opened_decision_id"], 2: None, 3: task["resolved_decision_id"]}
-        time_for_step = {1: task["created_at"], 2: task["evidence_refreshed_at"], 3: task["resolved_at"]}
+        time_for_step = {
+            1: task["created_at_dt"], 2: task["evidence_refreshed_at_dt"], 3: task["resolved_at_dt"],
+        }
         for (etask, eprofile, etenant, seq, etype, eactor, edecision, ecreated) in trail:
+            event_time = _parse_audit_timestamp(ecreated, "a repair_events.created_at value")
             if eprofile != task["profile_id"] or etenant != task["tenant_id"] or eactor != task["actor"]:
                 raise MigrationError("inconsistent_version", "a repair event is mis-scoped or has the wrong actor")
             if edecision != decision_for_step[seq]:
                 raise MigrationError("inconsistent_version", "a repair event references the wrong decision")
-            if ecreated != time_for_step[seq]:
+            if event_time != time_for_step[seq]:
                 raise MigrationError("inconsistent_version", "a repair event timestamp does not match its task step")
 
 

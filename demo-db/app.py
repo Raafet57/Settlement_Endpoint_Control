@@ -913,9 +913,19 @@ def _load_decisions(con: sqlite3.Connection, profile_id: int) -> list[dict]:
 
 
 def _load_repair_events(con: sqlite3.Connection, profile_id: int) -> list[dict]:
-    """The profile's append-only repair-event trail, in append (id) order."""
+    """Return the append-only trail in logical cycle/step order.
+
+    Primary keys are opaque identifiers, not chronology. Ordering by the opened
+    decision version and per-task sequence keeps history stable even if a valid
+    imported SQLite fixture uses non-monotonic task/event ids.
+    """
     rows = con.execute(
-        "SELECT * FROM repair_events WHERE profile_id = ? AND tenant_id = ? ORDER BY id",
+        "SELECT re.* FROM repair_events re "
+        "JOIN repair_tasks rt ON rt.id = re.task_id AND rt.tenant_id = re.tenant_id "
+        "JOIN profile_decisions opened ON opened.id = rt.opened_decision_id "
+        " AND opened.tenant_id = rt.tenant_id "
+        "WHERE re.profile_id = ? AND re.tenant_id = ? "
+        "ORDER BY opened.version, re.sequence",
         (profile_id, TENANT_ID),
     ).fetchall()
     return [_event_view(row) for row in rows]
@@ -931,10 +941,14 @@ def _append_repair_event(con: sqlite3.Connection, profile_id: int, task_id: int,
 
 
 def _load_current_repair(con: sqlite3.Connection, profile_id: int) -> dict | None:
-    """The profile's most recent repair task (live one first, else last resolved)."""
+    """Return the live task, otherwise the latest logically opened repair cycle."""
     row = con.execute(
-        "SELECT * FROM repair_tasks WHERE profile_id = ? AND tenant_id = ? ORDER BY id DESC LIMIT 1",
-        (profile_id, TENANT_ID),
+        "SELECT rt.* FROM repair_tasks rt "
+        "JOIN profile_decisions opened ON opened.id = rt.opened_decision_id "
+        " AND opened.tenant_id = rt.tenant_id "
+        "WHERE rt.profile_id = ? AND rt.tenant_id = ? "
+        "ORDER BY CASE WHEN rt.state <> ? THEN 0 ELSE 1 END, opened.version DESC LIMIT 1",
+        (profile_id, TENANT_ID, REPAIR_RESOLVED),
     ).fetchone()
     return _repair_view(row) if row else None
 
