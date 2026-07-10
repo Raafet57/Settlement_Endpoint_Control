@@ -61,6 +61,22 @@ Optional browser/mobile verification requires Python Playwright and an installed
 python3 demo/qa_browser_mobile.py
 ```
 
+## Quality gate (local and CI)
+
+One canonical, standard-library command runs every check — static QA, the full
+`demo-db` unit suite, the DB smoke, and Python/JSON/HTML/secret-pattern/
+retired-framing/workflow validation — and fails closed if any gate fails:
+
+```bash
+python3 ci.py
+```
+
+Continuous integration runs this **exact same command** on Python 3.9 via
+`.github/workflows/ci.yml`; local verification and CI are never allowed to
+diverge. The DB-backed application also emits structured JSON-Lines request and
+error logs to stderr (localhost diagnostics only, no request/response, query,
+header, or exception content).
+
 ## Repository layout
 
 ```text
@@ -68,6 +84,8 @@ demo/                 self-contained static reference demo
 demo-db/              localhost-only SQLite workflow proof
 docs/product-spine.md product model and control flow
 docs/claim-boundary.md implemented, synthetic, and unproven boundaries
+ci.py                  one canonical quality gate (local == CI)
+.github/workflows/ci.yml  CI running only the canonical quality gate
 SECURITY.md            security and disclosure posture
 ```
 

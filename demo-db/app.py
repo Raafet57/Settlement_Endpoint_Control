@@ -6,6 +6,8 @@ import argparse
 import json
 import re
 import sqlite3
+import sys
+import time
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -316,10 +318,134 @@ def validated_action(payload: dict) -> tuple[str, str]:
     return action_type, actor
 
 
+# --- Structured local request/error logging (SEC-O20) -----------------------
+# Diagnosable JSON Lines on stderr using only the standard library. Every record
+# is built from a fixed field allowlist, so no request body, response payload,
+# query string/value, header value, actor/action field value, SQL, exception
+# message, or other sensitive identifier can enter a log line. The SERVING
+# readiness banner stays on stdout and is unchanged.
+
+_FIXED_ROUTES = frozenset(
+    {"/", "/readyz", "/api/scenarios", "/api/audit/counts", "/api/source-manifest"}
+)
+
+
+def normalized_route(raw_target: str) -> str:
+    """Map a raw request target to a stable, non-sensitive route label.
+
+    The query string is dropped and the single variable slug segment is
+    collapsed to a ``{slug}`` placeholder, so no caller-controlled or sensitive
+    path/query value can reach a log line; unrecognized targets bucket to a
+    fixed sentinel. Total over arbitrary or malformed input.
+    """
+    try:
+        path = urlparse(raw_target or "").path.rstrip("/") or "/"
+    except ValueError:
+        # Malformed target (e.g. an unmatched IPv6 bracket makes urlparse raise);
+        # stay total and never echo the caller-controlled raw text.
+        return "/{other}"
+    if path in _FIXED_ROUTES:
+        return path
+    segments = path.count("/")
+    if path.startswith("/api/scenarios/") and path.endswith("/actions") and segments == 4:
+        return "/api/scenarios/{slug}/actions"
+    if path.startswith("/api/evidence/") and segments == 3:
+        return "/api/evidence/{slug}"
+    if path.startswith("/api/scenarios/") and segments == 3:
+        return "/api/scenarios/{slug}"
+    return "/{other}"
+
+
+# Finite allowlist of standard HTTP method names; any caller-selected method
+# token is collapsed to a fixed fallback so it is never reproduced in a log line.
+_ALLOWED_METHODS = frozenset(
+    {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT"}
+)
+
+
+def _allowed_method(command: object) -> str:
+    return command if isinstance(command, str) and command in _ALLOWED_METHODS else "OTHER"
+
+
+def _emit(record: dict) -> None:
+    # One compact JSON object per line on stderr, flushed so local tooling and
+    # tests observe each event immediately.
+    line = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    stream = sys.stderr
+    stream.write(line + "\n")
+    stream.flush()
+
+
+def log_request_event(method: str, path: str, status: object, elapsed_ms: object = None) -> None:
+    """Emit one access-log event with only allowlisted, non-sensitive fields."""
+    record = {
+        "ts": utc_now(),
+        "level": "info",
+        "event": "request",
+        "method": method,
+        "path": path,
+        "status": status,
+    }
+    if elapsed_ms is not None:
+        record["elapsed_ms"] = elapsed_ms
+    _emit(record)
+
+
+def log_error_event(method: str, path: str, category: str, exc: BaseException, status: int = 500) -> None:
+    """Emit one error event with a stable category and the exception class name.
+
+    Never records ``str(exc)``/``repr(exc)`` or any request/response content.
+    """
+    _emit(
+        {
+            "ts": utc_now(),
+            "level": "error",
+            "event": "error",
+            "method": method,
+            "path": path,
+            "status": status,
+            "category": category,
+            "exc_type": type(exc).__name__,
+        }
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "SettlementEndpointDemoDB/1.0"
 
-    def log_message(self, fmt: str, *args: object) -> None:
+    def handle_one_request(self) -> None:  # noqa: N802 - stdlib handler API
+        # Stamp a monotonic start so log_request can report elapsed time.
+        self._request_start = time.monotonic()
+        super().handle_one_request()
+
+    def _request_context(self):
+        # Safe (method, normalized-route) pair for logging. Method is an
+        # allowlisted standard method or "OTHER"; the path comes from the raw
+        # request line (always a str, never the possibly-unset/stale self.path)
+        # and is collapsed to a stable route label with the query string dropped.
+        method = _allowed_method(getattr(self, "command", None))
+        requestline = getattr(self, "requestline", "") or ""
+        parts = requestline.split()
+        target = parts[1] if len(parts) >= 2 else ""
+        return method, normalized_route(target)
+
+    def log_request(self, code: object = "-", size: object = "-") -> None:  # noqa: N802 - stdlib API
+        # Structured access log for every response (normal, client rejection,
+        # and framework error), replacing the default that echoes the raw
+        # request line -- including the query string -- to stderr.
+        method, path = self._request_context()
+        try:
+            status = int(code)
+        except (TypeError, ValueError):
+            status = None
+        start = getattr(self, "_request_start", None)
+        elapsed_ms = round((time.monotonic() - start) * 1000) if start is not None else None
+        log_request_event(method, path, status, elapsed_ms)
+
+    def log_message(self, fmt: str, *args: object) -> None:  # noqa: N802 - stdlib API
+        # Silence the default stderr sink; structured events are emitted via
+        # log_request / log_error_event instead. This also suppresses the
+        # framework's log_error text (it routes through log_message).
         return
 
     def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -341,9 +467,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
         try:
+            # Parse inside the try so a malformed target (urlparse ValueError)
+            # enters the deterministic structured internal-error path below.
+            path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/":
                 self.send_html()
             elif path == "/readyz":
@@ -371,12 +498,25 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
         except sqlite3.Error as exc:
-            self.send_json({"status": "error", "database": "unreachable", "detail": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            method, path = self._request_context()
+            log_error_event(method, path, "database_error", exc)
+            self.send_json(
+                {"status": "error", "database": "unreachable", "detail": "database_error"},
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        except Exception as exc:  # noqa: BLE001 - deterministic 500, never leak a traceback
+            method, path = self._request_context()
+            log_error_event(method, path, "internal_error", exc)
+            try:
+                self.send_json({"status": "error", "detail": "internal_error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            except Exception:  # noqa: BLE001 - response channel already broken
+                pass
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
         try:
+            # Parse inside the try so a malformed target (urlparse ValueError)
+            # enters the deterministic structured internal-error path below.
+            path = urlparse(self.path).path.rstrip("/") or "/"
             if path.startswith("/api/scenarios/") and path.endswith("/actions"):
                 parts = path.split("/")
                 if len(parts) != 5:
@@ -394,9 +534,26 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
         except RequestRejected as exc:
+            # Log the rejection with its existing stable code as the category so
+            # same-status rejection classes stay individually diagnosable; the
+            # category is a fixed hardcoded string, never derived from raw text.
+            method, path = self._request_context()
+            log_error_event(method, path, exc.error, exc, status=int(exc.status))
             self.send_json({"error": exc.error}, exc.status)
         except sqlite3.Error as exc:
-            self.send_json({"status": "error", "database": "unreachable", "detail": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            method, path = self._request_context()
+            log_error_event(method, path, "database_error", exc)
+            self.send_json(
+                {"status": "error", "database": "unreachable", "detail": "database_error"},
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        except Exception as exc:  # noqa: BLE001 - deterministic 500, never leak a traceback
+            method, path = self._request_context()
+            log_error_event(method, path, "internal_error", exc)
+            try:
+                self.send_json({"status": "error", "detail": "internal_error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            except Exception:  # noqa: BLE001 - response channel already broken
+                pass
 
 
 def main() -> None:

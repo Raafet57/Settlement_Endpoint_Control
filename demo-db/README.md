@@ -81,3 +81,22 @@ python3 demo-db/smoke.py
 ```
 
 The smoke reseeds a disposable synthetic state, writes one operator action, verifies persistence and audit append, and validates the evidence export.
+
+For the full project checks (this smoke plus static QA, the complete `demo-db`
+unit suite, and Python/JSON/HTML/secret/retired-framing/workflow validation) run
+the one canonical quality gate from the repository root — the same command CI
+runs on Python 3.9:
+
+```bash
+python3 ci.py
+```
+
+## Local logging
+
+`app.py` writes structured JSON-Lines request and error events to **stderr**
+(the `SERVING` readiness banner stays on stdout). Each event carries only a
+small allowlist of non-sensitive metadata — timestamp, level/event, HTTP method,
+a normalized route label, numeric status, and elapsed time — and error events
+add a stable `category` plus the exception class name. Request bodies, response
+payloads, query strings, header values, actor/action values, SQL, and exception
+text are never logged, and server error responses expose no raw exception detail.
