@@ -1,10 +1,27 @@
 # Settlement Endpoint Control Tower
 
-Synthetic reference demo for pre-validating identity-bound settlement endpoints before tokenized or fiat value moves.
+Public synthetic reference demo for governing wallet and token endpoints as
+settlement instructions before tokenized or fiat value moves.
 
 ## Product model
 
-The control tower combines institution identity, legal-entity authority, wallet and custody context, policy checks, fiat fallback instructions, and ISO 20022/UETR-style evidence into one governed endpoint profile.
+The control tower combines institution identity, legal-entity authority, wallet
+and custody context, policy checks, fiat fallback instructions, and ISO
+20022/UETR-style evidence into one governed endpoint profile. When a token
+endpoint lacks current control evidence, the token route is blocked or held,
+the fiat fallback is preserved, and the decision evidence is recorded.
+
+## Page contents
+
+- Landing narrative: the settlement-endpoint problem, the block-and-fallback
+  control moment, and the claim boundary.
+- Interactive demo console: four operating views, three deterministic synthetic
+  scenarios, three role perspectives, client-side synthetic evidence receipt.
+- Description of a deeper localhost-only reference application (deterministic
+  evaluator, profile lifecycle, repair and evidence refresh, deterministic
+  revalidation, append-only decision history through the localhost application
+  API with linked decision versions). That application is not hosted here and
+  is never called by this page.
 
 ## Demo boundary
 
@@ -12,10 +29,10 @@ The control tower combines institution identity, legal-entity authority, wallet 
 - No real payments.
 - No live identity or authority verification.
 - No live wallet-ownership checks.
-- No live sanctions or chain analytics.
+- No live sanctions or chain screening.
 - No proprietary reference-data rows.
 - No production compliance claim.
 
 ## Main artifact
 
-- `/` — self-contained browser demo with no external network calls.
+- `/` — self-contained browser page with no external network calls.

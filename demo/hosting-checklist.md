@@ -27,6 +27,7 @@ hosting-checklist.md
 /llms.txt returns HTTP 200 text/plain or text/markdown
 /README.md returns HTTP 200
 /hosting-checklist.md returns HTTP 200
+landing sections render: problem, control moment, demo console, working application, boundary
 all four tabs are selectable
 all three scenarios return the expected verdict
 all three role views render

@@ -23,6 +23,17 @@ VIEWPORTS = {
     "desktop": {"width": 1440, "height": 1000, "is_mobile": False},
     "mobile": {"width": 390, "height": 844, "is_mobile": True},
 }
+STATIC_SCENARIO_VERDICTS = {
+    "blocked": "TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED",
+    "refreshed": "TOKEN_ROUTE_APPROVED_FIAT_FALLBACK_RETAINED",
+    "authority": "AUTHORITY_EXPIRED_MANUAL_HOLD",
+}
+STATIC_ROLE_NOTES = {
+    "operator": "Ops analyst view",
+    "risk": "Risk reviewer view",
+    "approver": "Four-eyes approver view",
+}
+STATIC_BLOCKED_REPAIR_ITEMS = ("wallet allowlist", "endpoint-control payload", "authority evidence")
 
 
 def free_port() -> int:
@@ -109,13 +120,148 @@ def assert_no_horizontal_overflow(page, label: str) -> None:
         raise AssertionError(f"HORIZONTAL_OVERFLOW {label} {json.dumps(metrics, sort_keys=True)}")
 
 
+def tab_states(page) -> list:
+    return page.evaluate(
+        """() => Array.from(document.querySelectorAll('.tab')).map(btn => ({
+          screen: btn.dataset.screen,
+          selected: btn.getAttribute('aria-selected'),
+          tabindex: btn.tabIndex,
+          focused: document.activeElement === btn,
+        }))"""
+    )
+
+
+def assert_active_tab(page, expected_screen: str, label: str, step: str) -> None:
+    states = tab_states(page)
+    selected = [s for s in states if s["selected"] == "true"]
+    if len(selected) != 1 or selected[0]["screen"] != expected_screen:
+        raise AssertionError(f"TAB_SELECTION {label} {step} {states}")
+    roving_ok = all(s["tabindex"] == (0 if s["screen"] == expected_screen else -1) for s in states)
+    if not roving_ok:
+        raise AssertionError(f"TAB_ROVING_TABINDEX {label} {step} {states}")
+    if not selected[0]["focused"]:
+        raise AssertionError(f"TAB_FOCUS {label} {step} {states}")
+
+
+def check_tab_keyboard(page, label: str) -> None:
+    profile = page.locator('[data-screen="profile"]')
+    profile.click()
+    profile.focus()
+    assert_active_tab(page, "profile", label, "focus-profile")
+    page.keyboard.press("ArrowRight")
+    assert_active_tab(page, "validation", label, "arrow-right")
+    page.keyboard.press("End")
+    assert_active_tab(page, "audit", label, "end")
+    page.keyboard.press("Home")
+    assert_active_tab(page, "profile", label, "home")
+    page.keyboard.press("ArrowLeft")
+    assert_active_tab(page, "audit", label, "arrow-left-wrap")
+    page.keyboard.press("ArrowRight")
+    assert_active_tab(page, "profile", label, "arrow-right-wrap")
+
+
+def theme_state(page) -> dict:
+    return page.evaluate(
+        """() => {
+          const toggle = document.getElementById('themeToggle');
+          return {
+            dark: document.documentElement.classList.contains('dark'),
+            label: toggle.getAttribute('aria-label'),
+            pressed: toggle.getAttribute('aria-pressed'),
+            visible: toggle.innerText.trim(),
+          };
+        }"""
+    )
+
+
+def assert_theme_announced(state: dict, label: str, step: str) -> None:
+    expected_label = "Dark mode"
+    expected_pressed = "true" if state["dark"] else "false"
+    if state["label"] != expected_label or state["visible"] != expected_label or state["pressed"] != expected_pressed:
+        raise AssertionError(f"THEME_ARIA {label} {step} {state}")
+
+
+def check_theme_toggle(page, label: str) -> None:
+    initial = theme_state(page)
+    assert_theme_announced(initial, label, "initial")
+    page.locator("#themeToggle").click()
+    flipped = theme_state(page)
+    assert_theme_announced(flipped, label, "flipped")
+    if flipped["dark"] == initial["dark"]:
+        raise AssertionError(f"THEME_DID_NOT_FLIP {label} {initial} {flipped}")
+    page.locator("#themeToggle").click()
+    restored = theme_state(page)
+    assert_theme_announced(restored, label, "restored")
+    if restored["dark"] != initial["dark"]:
+        raise AssertionError(f"THEME_DID_NOT_RESTORE {label} {initial} {restored}")
+
+
+def check_scenarios_and_roles(page, label: str) -> None:
+    for scenario, verdict in STATIC_SCENARIO_VERDICTS.items():
+        page.select_option("#scenarioSelect", scenario)
+        actual = page.locator("#receiptVerdict").inner_text(timeout=3000).strip()
+        if actual != verdict:
+            raise AssertionError(f"SCENARIO_VERDICT {label} {scenario} expected {verdict!r} got {actual!r}")
+    page.select_option("#scenarioSelect", "blocked")
+    page.locator('[data-screen="decision"]').click()
+    repair = page.locator("#repairText").inner_text(timeout=3000)
+    missing_repairs = [item for item in STATIC_BLOCKED_REPAIR_ITEMS if item not in repair]
+    if missing_repairs:
+        raise AssertionError(f"BLOCKED_REPAIR_TEXT {label} missing {missing_repairs} in {repair!r}")
+    page.locator('[data-screen="validation"]').click()
+    for role, note_prefix in STATIC_ROLE_NOTES.items():
+        page.select_option("#roleSelect", role)
+        note = page.locator("#roleNote").inner_text(timeout=3000)
+        if note_prefix not in note:
+            raise AssertionError(f"ROLE_NOTE {label} {role} expected {note_prefix!r} in {note!r}")
+
+
+def check_replay(page, label: str) -> None:
+    # Start from a non-default state to prove replay resets scenario and role.
+    page.select_option("#scenarioSelect", "refreshed")
+    page.select_option("#roleSelect", "risk")
+    started = time.monotonic()
+    page.get_by_role("button", name="Replay the control moment").first.click()
+    page.wait_for_function(
+        "() => document.getElementById('walkthroughBadge').textContent.trim() === 'step 2 of 4'",
+        timeout=3000,
+    )
+    intermediate_elapsed = time.monotonic() - started
+    intermediate = page.evaluate(
+        """() => ({
+          badge: document.getElementById('walkthroughBadge').textContent.trim(),
+          screen: window.__settlementDemo.appState.screen,
+          validationActive: document.getElementById('view-validation').classList.contains('active'),
+        })"""
+    )
+    if intermediate != {"badge": "step 2 of 4", "screen": "validation", "validationActive": True}:
+        raise AssertionError(f"REPLAY_INTERMEDIATE_STATE {label} {intermediate}")
+    if intermediate_elapsed < 0.75:
+        raise AssertionError(f"REPLAY_NOT_TIMED {label} reached step 2 in {intermediate_elapsed:.3f}s")
+    page.wait_for_function(
+        "() => document.getElementById('walkthroughBadge').textContent.trim() === 'step 4 of 4'",
+        timeout=8000,
+    )
+    state = page.evaluate(
+        """() => ({
+          scenario: window.__settlementDemo.appState.scenario,
+          role: window.__settlementDemo.appState.role,
+          screen: window.__settlementDemo.appState.screen,
+          auditActive: document.getElementById('view-audit').classList.contains('active'),
+        })"""
+    )
+    if state != {"scenario": "blocked", "role": "operator", "screen": "audit", "auditActive": True}:
+        raise AssertionError(f"REPLAY_STATE {label} {state}")
+
+
 def smoke_static(context, base_url: str, viewport_name: str) -> dict:
     errors: list[str] = []
+    label = f"static-{viewport_name}"
     page = context.new_page()
     page.on("console", lambda msg: errors.append(f"console:{msg.type}:{msg.text}") if msg.type in {"error", "warning"} else None)
     page.on("pageerror", lambda exc: errors.append(f"pageerror:{exc}"))
     page.goto(base_url, wait_until="networkidle")
-    page.get_by_role("heading", name="Identity-bound endpoints before value moves.").wait_for(timeout=5000)
+    page.get_by_role("heading", name="A wallet address is not a settlement instruction.").wait_for(timeout=5000)
     page.locator('[data-screen="profile"]').click()
     page.locator('[data-screen="validation"]').click()
     page.get_by_text("Endpoint pre-validation").wait_for(timeout=3000)
@@ -123,14 +269,10 @@ def smoke_static(context, base_url: str, viewport_name: str) -> dict:
     page.get_by_text("Policy route decision").wait_for(timeout=3000)
     page.locator('[data-screen="audit"]').click()
     page.get_by_text("Evidence and audit pack").wait_for(timeout=3000)
-    page.select_option("#scenarioSelect", "refreshed")
-    evidence_text = page.locator("#evidenceJson").inner_text(timeout=3000)
-    if "TOKEN_ROUTE_APPROVED_FIAT_FALLBACK_RETAINED" not in evidence_text:
-        raise AssertionError("STATIC_SCENARIO_SWITCH_FAILED refreshed verdict missing")
-    page.select_option("#roleSelect", "risk")
-    role_note = page.locator("#roleNote").inner_text(timeout=3000)
-    if "Risk reviewer view" not in role_note:
-        raise AssertionError("STATIC_ROLE_SWITCH_FAILED risk note missing")
+    check_tab_keyboard(page, label)
+    check_scenarios_and_roles(page, label)
+    check_theme_toggle(page, label)
+    check_replay(page, label)
     with page.expect_download(timeout=3000) as download_info:
         page.get_by_role("button", name="Download synthetic evidence JSON").click()
     download = download_info.value
@@ -139,9 +281,11 @@ def smoke_static(context, base_url: str, viewport_name: str) -> dict:
     evidence = json.loads(target.read_text(encoding="utf-8"))
     if evidence.get("boundary") != "synthetic_data_only_no_external_network_calls":
         raise AssertionError(f"STATIC_EVIDENCE_BOUNDARY {evidence.get('boundary')}")
-    assert_no_bad_text(page, f"static-{viewport_name}")
-    assert_no_horizontal_overflow(page, f"static-{viewport_name}")
-    assert_no_console_or_page_errors(errors, f"static-{viewport_name}")
+    if evidence.get("verdict") != STATIC_SCENARIO_VERDICTS["blocked"]:
+        raise AssertionError(f"STATIC_EVIDENCE_VERDICT {evidence.get('verdict')}")
+    assert_no_bad_text(page, label)
+    assert_no_horizontal_overflow(page, label)
+    assert_no_console_or_page_errors(errors, label)
     shot = ARTIFACT_DIR / f"static-{viewport_name}.png"
     page.screenshot(path=str(shot), full_page=True)
     page.close()

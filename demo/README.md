@@ -1,14 +1,26 @@
-# Static reference demo
+# Public landing page and static reference demo
 
-Self-contained browser demo for Settlement Endpoint Control Tower.
+Self-contained public page for Settlement Endpoint Control Tower: a full
+landing narrative plus the embedded browser demo console.
 
-## What it demonstrates
+## What it covers
 
-- Identity-bound settlement endpoint profile.
-- BIC, LEI/vLEI-style authority, wallet endpoint, custody context, token rail, and fiat fallback.
-- Blocked, approved, and authority-expired scenarios.
-- Operations analyst, risk reviewer, and four-eyes approver views.
-- Endpoint pre-validation, route decision, audit trail, and synthetic evidence receipt.
+- The settlement-endpoint problem: token endpoints handled as pasted addresses
+  instead of governed settlement instructions.
+- The control moment: valid beneficiary and usable fiat SSI, but a token
+  endpoint without current control evidence — blocked, fallback selected,
+  evidence recorded.
+- The interactive demo console: endpoint profile, pre-validation, route
+  decision, and evidence/audit views; blocked, approved, and authority-expired
+  scenarios; operations analyst, risk reviewer, and four-eyes approver
+  perspectives; client-side synthetic evidence receipt.
+- The working localhost reference application (`demo-db/`): deterministic
+  evaluator, endpoint profile lifecycle, repair and evidence refresh,
+  deterministic revalidation, and append-only decision history through the
+  localhost application API (linked decision versions, prior versions
+  preserved) — described as localhost-only synthetic operational-depth proof,
+  never exposed by this page.
+- The claim boundary: what the demo is and is not.
 
 ## Run locally
 
@@ -26,4 +38,6 @@ Open `http://127.0.0.1:8000/`.
 python3 demo/qa_static_demo.py
 ```
 
-The demo is synthetic and browser-only. It makes no external network calls and performs no live payment, identity, authority, wallet, screening, or compliance operation.
+The page is synthetic and browser-only. It makes no external network calls and
+performs no live payment, identity, authority, wallet, screening, or
+compliance operation.

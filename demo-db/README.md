@@ -182,8 +182,8 @@ layers **versioned advisory decisions** over the profile without mutating it.
   the failing profile)   onto the repair task)                 decision vN+1)
 ```
 
-- **Open** records the profile's current failing evaluation as the immutable
-  baseline decision (`origin=baseline`, `version=1`, no predecessor); a later
+- **Open** records the profile's current failing evaluation as the baseline
+  decision (`origin=baseline`, `version=1`, no predecessor); a later
   cycle reuses the latest recorded decision as its baseline. An already-approved
   latest decision has `nothing_to_repair`; a second live open is
   `repair_already_open`.
@@ -196,24 +196,30 @@ layers **versioned advisory decisions** over the profile without mutating it.
   task to it. The verdict is deterministic: the same refreshed evidence always
   produces the same advisory verdict (ALLOW or a specific HOLD).
 
-**Immutable decision snapshots / version links** — each `profile_decisions` row
-snapshots the graded evidence that produced its verdict and is never updated. A
-profile's decisions form a linear `1..N` chain (`previous_decision_id` links each
-revalidation to the decision it supersedes); every prior decision and its
-evidence snapshot stay queryable after a repair.
+**Append-only decision snapshots / version links through the application API** —
+each `profile_decisions` row snapshots the graded evidence that produced its
+verdict. The localhost application's write routes insert linked versions and
+expose no decision update or delete route. A profile's decisions form a linear
+`1..N` chain (`previous_decision_id` links each revalidation to the decision it
+supersedes); every prior decision and its evidence snapshot stay queryable after
+a repair. This is an application-API contract, not database-level immutability
+or tamper evidence.
 
-**Narrow repair-event trail** — `repair_events` appends exactly one immutable,
-ordered event per step (`repair_opened`, `evidence_refreshed`, `revalidated`),
-profile- and task-scoped, carrying only the step kind, the accountable actor, and
-the decision the step concerns (none for the evidence step). No request/response
-payload is stored. It is a profile trail and never carries a scenario id.
+**Narrow repair-event trail through the application API** — `repair_events`
+appends exactly one ordered event per step (`repair_opened`,
+`evidence_refreshed`, `revalidated`), profile- and task-scoped, carrying only the
+step kind, the accountable actor, and the decision the step concerns (none for
+the evidence step). The application exposes no repair-event update or delete
+route. No request/response payload is stored. It is a profile trail and never
+carries a scenario id.
 
 **Promoted advisory verdict on reads** — once a repair records a decision, the read
 surfaces promote the **latest versioned decision**: the collection
 (`GET /api/endpoint-profiles`) reports its verdict in `verdict`, and the detail
 exposes it as an explicit `latest_decision` (and a promoted `verdict`). The
-intrinsic `evaluation` — computed live from the immutable constituent fields — stays
-separately available and is never rewritten, so a HOLD profile revalidated to ALLOW
+intrinsic `evaluation` — computed live from the activation-frozen constituent
+fields — stays separately available and is not rewritten by the repair flow, so
+a HOLD profile revalidated to ALLOW
 reads ALLOW on the advisory surface while its intrinsic evaluation still reflects the
 unchanged fields. Each mutation receipt and each compound read is assembled from a
 single connection snapshot / exact ids, so concurrent repair cycles can never mix
@@ -233,11 +239,12 @@ step fails closed transactionally (`409` `invalid_transition`, `no_open_repair`,
 database's per-row state CHECKs and the one-open partial UNIQUE index enforce the
 same rails so a half-written or duplicate-live task cannot exist.
 
-**Active-profile immutability** — the repair is an advisory overlay: the active
-profile's constituent institution / legal-entity / endpoint / fallback rows and
-its intrinsic evaluation are never changed (SEC-P20 immutability is preserved).
-The refreshed evidence lives on the repair task and the revalidation decision,
-not on the profile.
+**Active-profile freeze through the application API** — the repair is an
+advisory overlay: the application's repair routes do not change the active
+profile's constituent institution / legal-entity / endpoint / fallback rows or
+its intrinsic evaluation. The refreshed evidence lives on the repair task and
+the revalidation decision, not on the profile. This describes the API behavior,
+not a database-level write prohibition.
 
 Every repair route reuses the same localhost write boundary as the other profile
 writes (strict `application/json`, loopback Origin/Host, bounded body, fail-closed

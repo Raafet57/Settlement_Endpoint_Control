@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
   <title>Settlement Endpoint Control Tower</title>
-  <meta name="description" content="Production-shaped synthetic demo for pre-validating identity-bound settlement endpoints across tokenized and fiat rails." />
+  <meta name="description" content="Public synthetic reference demo: govern wallet and token endpoints as settlement instructions — identity, authority, custody context, policy evidence, fiat fallback, and recorded route decisions before value moves." />
   <script>
     /* Apply theme before paint to avoid a flash. Defaults to the light brand system
        unless the user has chosen dark, or their OS prefers dark with no saved choice. */
@@ -54,6 +54,7 @@
       --elevate-1: rgba(0,0,0,0.03);
       --elevate-2: rgba(0,0,0,0.08);
       --radius: 0.5rem;
+      color-scheme: light;
       font-family: Inter, "Plus Jakarta Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     html.dark {
@@ -78,6 +79,7 @@
       --info-fg: 199 89% 62%;
       --elevate-1: rgba(255,255,255,0.04);
       --elevate-2: rgba(255,255,255,0.09);
+      color-scheme: dark;
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
@@ -92,12 +94,35 @@
     button, select, input { font: inherit; }
     button { min-height: 44px; }
     .mono { font-family: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .shell { max-width: 1280px; margin: 0 auto; padding: 24px 20px 32px; }
+    .shell { max-width: 1280px; margin: 0 auto; padding: 0 20px; }
+    .skip-link {
+      position: absolute; left: 12px; top: -60px; z-index: 100;
+      padding: 12px 16px; border-radius: var(--radius);
+      background: hsl(var(--primary)); color: hsl(var(--primary-foreground));
+      font-weight: 600; text-decoration: none; transition: top .15s ease;
+    }
+    .skip-link:focus-visible { top: 12px; outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 
-    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; color: hsl(var(--muted-foreground)); font-size: 13px; flex-wrap: wrap; }
-    .brandline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .dot-mark { width: 9px; height: 9px; border-radius: 50%; background: hsl(var(--primary)); }
-    .topbar-right { display: flex; align-items: center; gap: 12px; }
+    /* ---------- Site navigation ---------- */
+    .sitenav-wrap {
+      position: sticky; top: 0; z-index: 50;
+      background: hsl(var(--background) / .88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid hsl(var(--border));
+    }
+    .sitenav { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 62px; padding: 8px 0; }
+    .brand { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 700; letter-spacing: -.01em; white-space: nowrap; }
+    .dot-mark { width: 10px; height: 10px; border-radius: 50%; background: hsl(var(--primary)); box-shadow: 0 0 0 4px hsl(var(--primary) / .18); flex: none; }
+    .brand .badge { font-weight: 500; }
+    .nav-links { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+    .nav-links a {
+      display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px;
+      color: hsl(var(--muted-foreground)); text-decoration: none; font-size: 13.5px; font-weight: 500;
+      border-radius: var(--radius); transition: color .15s ease, background .15s ease;
+    }
+    .nav-links a:hover { color: hsl(var(--foreground)); background: hsl(var(--secondary)); }
+    .nav-links a:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; }
     .theme-toggle {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       min-height: 44px; min-width: 44px; padding: 0 14px;
@@ -110,12 +135,8 @@
     .theme-toggle:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
     .theme-toggle svg { width: 17px; height: 17px; }
     .theme-toggle .icon-sun { display: none; }
-    .theme-toggle .label-dark { display: inline; }
-    .theme-toggle .label-light { display: none; }
     html.dark .theme-toggle .icon-sun { display: inline; }
     html.dark .theme-toggle .icon-moon { display: none; }
-    html.dark .theme-toggle .label-dark { display: none; }
-    html.dark .theme-toggle .label-light { display: inline; }
 
     .badge, .pill {
       display: inline-flex; align-items: center; gap: 8px;
@@ -130,21 +151,6 @@
     .bad { color: hsl(var(--danger-fg)); border-color: hsl(var(--destructive) / .42); background: hsl(var(--destructive) / .10); }
     .info { color: hsl(var(--info-fg)); border-color: hsl(var(--primary) / .42); background: hsl(var(--primary) / .10); }
 
-    header {
-      display: grid;
-      grid-template-columns: minmax(0, 1.4fr) minmax(300px, .92fr);
-      border: 1px solid hsl(var(--card-border));
-      border-radius: 16px;
-      background: hsl(var(--card));
-      overflow: hidden;
-    }
-    .hero { padding: clamp(24px, 3vw, 40px); min-width: 0; }
-    .eyebrow { display: inline-flex; align-items: center; gap: 8px; color: hsl(var(--primary)); letter-spacing: .12em; text-transform: uppercase; font-size: 12px; font-weight: 600; margin-bottom: 16px; }
-    h1 { font-size: clamp(30px, 4.4vw, 52px); line-height: 1.06; letter-spacing: -.022em; margin: 0; max-width: 660px; text-wrap: balance; font-weight: 700; }
-    h1 .hl { color: hsl(var(--primary)); }
-    .subtitle { color: hsl(var(--muted-foreground)); font-size: clamp(15px, 1.3vw, 18px); line-height: 1.6; max-width: 640px; margin: 18px 0 0; }
-    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
-
     .btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       min-height: 44px; padding: 11px 18px;
@@ -152,32 +158,153 @@
       color: hsl(var(--foreground));
       background: hsl(var(--card));
       border-radius: var(--radius);
-      font-size: 14px; font-weight: 500; cursor: pointer;
+      font-size: 14px; font-weight: 500; cursor: pointer; text-decoration: none;
       transition: background .15s ease, border-color .15s ease, color .15s ease;
     }
     .btn:hover { background: hsl(var(--secondary)); }
     .btn:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
     .btn.primary { background: hsl(var(--primary)); border-color: hsl(var(--primary)); color: hsl(var(--primary-foreground)); font-weight: 600; }
     .btn.primary:hover { background: hsl(199 89% 43%); }
-    .btn.danger { color: hsl(var(--danger-fg)); border-color: hsl(var(--destructive) / .42); }
 
-    /* Claim boundary uses the brand dark-navy panel to signal trust/evidence. */
-    .status-card { padding: clamp(22px, 2.5vw, 30px); background: hsl(var(--sidebar)); color: hsl(var(--sidebar-foreground)); display: grid; gap: 16px; align-content: start; }
-    .status-card h2 { font-size: 16px; margin: 0; font-weight: 600; }
-    .status-card p { color: hsl(210 20% 80%); line-height: 1.55; margin: 0; font-size: 13.5px; }
-    .status-grid { display: grid; gap: 6px; }
-    .status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid hsl(var(--sidebar-border)); }
-    .status-row:first-child { border-top: 0; }
-    .status-row > span:first-child { color: hsl(210 20% 78%); font-size: 13px; }
-    .status-card .pill { background: hsl(var(--sidebar-border) / .55); border-color: hsl(var(--sidebar-border)); color: hsl(210 20% 88%); }
-    .status-card .pill.good { color: hsl(172 66% 62%); border-color: hsl(172 66% 50% / .4); background: hsl(172 66% 50% / .14); }
-    .status-card .pill.warn { color: hsl(43 92% 66%); border-color: hsl(43 88% 55% / .4); background: hsl(43 88% 55% / .14); }
-    .status-card .pill.info { color: hsl(199 89% 66%); border-color: hsl(199 89% 55% / .4); background: hsl(199 89% 55% / .14); }
-    .status-card .pill.bad { color: hsl(0 84% 72%); border-color: hsl(0 84% 60% / .4); background: hsl(0 84% 60% / .14); }
+    /* ---------- Dark navy bands (hero + working application) ----------
+       Brand-sanctioned evidence/protocol surface: identical in both themes. */
+    .band {
+      position: relative;
+      background: hsl(var(--sidebar));
+      color: hsl(var(--sidebar-foreground));
+      border-bottom: 1px solid hsl(var(--sidebar-border));
+      overflow: hidden;
+    }
+    .band::before {
+      content: ""; position: absolute; inset: 0; pointer-events: none;
+      background-image:
+        linear-gradient(hsl(210 40% 70% / .05) 1px, transparent 1px),
+        linear-gradient(90deg, hsl(210 40% 70% / .05) 1px, transparent 1px);
+      background-size: 44px 44px;
+    }
+    .band > .shell { position: relative; }
+    .band p { color: hsl(210 20% 78%); }
+    .band .pill { background: hsl(var(--sidebar-border) / .55); border-color: hsl(var(--sidebar-border)); color: hsl(210 20% 88%); }
+    .band .pill.good { color: hsl(172 66% 62%); border-color: hsl(172 66% 50% / .4); background: hsl(172 66% 50% / .14); }
+    .band .pill.warn { color: hsl(43 92% 66%); border-color: hsl(43 88% 55% / .4); background: hsl(43 88% 55% / .14); }
+    .band .pill.info { color: hsl(199 89% 66%); border-color: hsl(199 89% 55% / .4); background: hsl(199 89% 55% / .14); }
+    .band .pill.bad { color: hsl(0 84% 72%); border-color: hsl(0 84% 60% / .4); background: hsl(0 84% 60% / .14); }
 
-    main { display: grid; gap: 20px; margin-top: 20px; }
+    /* ---------- Hero ---------- */
+    .hero-grid {
+      display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr);
+      gap: clamp(28px, 4vw, 56px); align-items: center;
+      padding-top: clamp(48px, 7vw, 96px); padding-bottom: clamp(48px, 7vw, 96px);
+    }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      color: hsl(199 89% 62%); letter-spacing: .14em; text-transform: uppercase;
+      font-size: 12px; font-weight: 600; margin-bottom: 20px;
+    }
+    .eyebrow::before { content: ""; width: 22px; height: 1px; background: hsl(199 89% 62% / .6); }
+    h1 {
+      font-size: clamp(34px, 5vw, 62px); line-height: 1.04; letter-spacing: -.025em;
+      margin: 0; max-width: 640px; text-wrap: balance; font-weight: 700; color: hsl(0 0% 100%);
+    }
+    h1 .hl { color: hsl(199 89% 62%); }
+    .lede { font-size: clamp(15px, 1.35vw, 18px); line-height: 1.65; max-width: 600px; margin: 22px 0 0; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+    .band .btn { background: transparent; border-color: hsl(var(--sidebar-border)); color: hsl(210 20% 92%); }
+    .band .btn:hover { background: hsl(210 40% 60% / .12); }
+    .band .btn.primary { background: hsl(var(--primary)); border-color: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+    .band .btn.primary:hover { background: hsl(199 89% 43%); }
+    .hero-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
+
+    /* Decision ticket: the visual thesis. Static composition, synthetic fixture. */
+    .ticket {
+      border: 1px solid hsl(var(--sidebar-border)); border-radius: 14px;
+      background: hsl(222 47% 9% / .92); overflow: hidden;
+      box-shadow: 0 24px 60px hsl(222 47% 4% / .5);
+    }
+    .ticket-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 13px 16px; border-bottom: 1px solid hsl(var(--sidebar-border));
+      font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: hsl(210 20% 65%);
+    }
+    .ticket-rows { display: grid; }
+    .ticket-row {
+      display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center;
+      padding: 13px 16px; border-bottom: 1px solid hsl(var(--sidebar-border) / .7);
+    }
+    .ticket-row b { display: block; font-size: 13.5px; color: hsl(210 20% 94%); font-weight: 600; }
+    .ticket-row small { display: block; margin-top: 3px; color: hsl(215 16% 62%); font-size: 12px; line-height: 1.4; }
+    .ticket-verdict {
+      padding: 14px 16px; background: hsl(0 84% 60% / .12); border-bottom: 1px solid hsl(var(--sidebar-border));
+      color: hsl(0 84% 74%); font-size: 12.5px; font-weight: 600; letter-spacing: .02em; overflow-wrap: anywhere;
+    }
+    .ticket-verdict span { display: block; color: hsl(210 20% 65%); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; margin-bottom: 6px; font-weight: 500; }
+    .ticket-foot { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 13px 16px; color: hsl(215 16% 62%); font-size: 12px; }
+    .light { width: 10px; height: 10px; border-radius: 50%; background: hsl(var(--muted-foreground)); flex: none; }
+    .light.good { background: hsl(var(--accent)); }
+    .light.warn { background: hsl(var(--warning)); }
+    .light.bad { background: hsl(var(--destructive)); }
+
+    /* ---------- Landing sections ---------- */
+    .section { padding: clamp(56px, 7vw, 104px) 0; }
+    .section.tint { background: hsl(var(--secondary) / .45); border-top: 1px solid hsl(var(--border)); border-bottom: 1px solid hsl(var(--border)); }
+    .section-mark { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; color: hsl(var(--primary)); font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; }
+    .band .section-mark { color: hsl(199 89% 62%); }
+    .section-mark .idx { font-weight: 700; }
+    .section-mark::after { content: ""; flex: 1; max-width: 64px; height: 1px; background: currentColor; opacity: .4; }
+    h2 { font-size: clamp(26px, 3.2vw, 40px); line-height: 1.12; letter-spacing: -.022em; margin: 0; max-width: 760px; text-wrap: balance; font-weight: 700; }
+    .band h2 { color: hsl(0 0% 100%); }
+    .section-lede { color: hsl(var(--muted-foreground)); font-size: clamp(14.5px, 1.25vw, 17px); line-height: 1.65; max-width: 760px; margin: 18px 0 0; }
+
+    .compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 36px; }
+    .compare-col { border: 1px solid hsl(var(--border)); border-radius: 14px; background: hsl(var(--card)); padding: 22px; }
+    .compare-col.governed { border-top: 3px solid hsl(var(--accent)); }
+    .compare-col.exposed { border-top: 3px solid hsl(var(--destructive)); }
+    .compare-col h3 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
+    .compare-col > p { color: hsl(var(--muted-foreground)); font-size: 13.5px; line-height: 1.55; margin: 8px 0 14px; }
+    .trait { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 10px 0; border-top: 1px solid hsl(var(--border)); font-size: 14px; line-height: 1.5; }
+    .trait .light { transform: translateY(1px); }
+
+    .qlist { display: grid; gap: 10px; margin-top: 36px; counter-reset: q; }
+    .qlist h3 { margin: 0 0 6px; font-size: 17px; letter-spacing: -.01em; }
+    .q { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 16px; align-items: baseline; border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); padding: 15px 18px; }
+    .q b { color: hsl(var(--primary)); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700; }
+    .q span { font-size: 15px; line-height: 1.5; font-weight: 500; }
+    .q-close { color: hsl(var(--muted-foreground)); font-size: 14.5px; line-height: 1.6; margin: 22px 0 0; max-width: 760px; }
+    .q-close b { color: hsl(var(--foreground)); }
+
+    /* Control moment timeline */
+    .timeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-top: 38px; }
+    .tl-step { position: relative; border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); padding: 18px 16px; }
+    .tl-step .num { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: hsl(var(--primary) / .12); color: hsl(var(--primary)); font-weight: 700; font-size: 13px; margin-bottom: 12px; }
+    .tl-step.fail .num { background: hsl(var(--destructive) / .12); color: hsl(var(--danger-fg)); }
+    .tl-step.save .num { background: hsl(var(--accent) / .14); color: hsl(var(--success-fg)); }
+    .tl-step h3 { margin: 0 0 7px; font-size: 14.5px; letter-spacing: -.01em; }
+    .tl-step p { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12.5px; line-height: 1.5; }
+    .moment-verdict {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 26px;
+      border: 1px solid hsl(var(--border)); border-left: 3px solid hsl(var(--destructive));
+      border-radius: 12px; background: hsl(var(--card)); padding: 16px 18px;
+    }
+    .moment-verdict .mono { font-size: 13px; font-weight: 600; color: hsl(var(--danger-fg)); overflow-wrap: anywhere; }
+    .moment-verdict small { color: hsl(var(--muted-foreground)); font-size: 12.5px; }
+    .moment-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 26px; }
+    .moment-actions small { color: hsl(var(--muted-foreground)); font-size: 12.5px; }
+
+    /* ---------- Demo console ---------- */
+    .console-frame { margin-top: 36px; border: 1px solid hsl(var(--card-border)); border-radius: 16px; background: hsl(var(--background)); box-shadow: 0 18px 48px hsl(222 47% 11% / .10); overflow: hidden; }
+    .console-chrome {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+      padding: 12px 18px; background: hsl(var(--sidebar)); color: hsl(210 20% 80%);
+      border-bottom: 1px solid hsl(var(--sidebar-border)); font-size: 12.5px;
+    }
+    .console-chrome .dots { display: inline-flex; gap: 6px; margin-right: 12px; }
+    .console-chrome .dots i { width: 10px; height: 10px; border-radius: 50%; background: hsl(var(--sidebar-border)); }
+    .console-chrome .chrome-title { display: inline-flex; align-items: center; font-weight: 600; color: hsl(210 20% 92%); }
+    .console-chrome .chrome-right { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .console-body { padding: 18px; display: grid; gap: 18px; }
+
     .control-strip {
-      position: sticky; top: 0; z-index: 20;
+      position: sticky; top: 70px; z-index: 20;
       display: grid; gap: 12px;
       padding: 12px;
       border: 1px solid hsl(var(--card-border));
@@ -208,10 +335,10 @@
     }
     select:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 
-    .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 20px; align-items: start; }
+    .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 18px; align-items: start; }
     .card { border: 1px solid hsl(var(--card-border)); border-radius: 14px; background: hsl(var(--card)); overflow: hidden; }
     .card-head { padding: 16px 18px; border-bottom: 1px solid hsl(var(--card-border)); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-    .card-head h2, .card-head h3 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+    .card-head h3, .card-head h4 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
     .card-body { padding: 18px; }
     .kv { display: grid; gap: 10px; }
     .kv-row { padding: 13px; border: 1px solid hsl(var(--border)); border-radius: 10px; background: hsl(var(--secondary) / .45); }
@@ -222,11 +349,11 @@
     .view { display: none; }
     .view.active { display: block; }
     .screen-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
-    .screen-title h2 { margin: 0; font-size: clamp(22px, 2.6vw, 30px); line-height: 1.15; letter-spacing: -.02em; font-weight: 700; text-wrap: balance; }
+    .screen-title h3 { margin: 0; font-size: clamp(22px, 2.6vw, 30px); line-height: 1.15; letter-spacing: -.02em; font-weight: 700; text-wrap: balance; }
     .screen-title p { color: hsl(var(--muted-foreground)); line-height: 1.55; max-width: 760px; margin: 8px 0 0; font-size: 14.5px; }
     .panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .panel { border: 1px solid hsl(var(--border)); border-radius: 12px; padding: 16px; background: hsl(var(--card)); }
-    .panel h3 { margin: 0 0 12px; color: hsl(var(--primary)); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+    .panel h4 { margin: 0 0 12px; color: hsl(var(--primary)); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
     .field { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 12px; padding: 10px 0; border-top: 1px solid hsl(var(--border)); }
     .field:first-of-type { border-top: 0; }
     .field span:first-child { color: hsl(var(--muted-foreground)); font-size: 12.5px; }
@@ -237,10 +364,6 @@
     .stage small { color: hsl(var(--muted-foreground)); line-height: 1.4; font-size: 12px; }
     .checks { display: grid; gap: 10px; }
     .check { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 1px solid hsl(var(--border)); border-radius: 10px; padding: 13px; background: hsl(var(--card)); }
-    .light { width: 10px; height: 10px; border-radius: 50%; background: hsl(var(--muted-foreground)); }
-    .light.good { background: hsl(var(--accent)); }
-    .light.warn { background: hsl(var(--warning)); }
-    .light.bad { background: hsl(var(--destructive)); }
     .check b { display: block; font-size: 14px; }
     .check small { color: hsl(var(--muted-foreground)); display: block; margin-top: 3px; line-height: 1.4; font-size: 12.5px; }
     .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -248,7 +371,7 @@
     .route.selected { border-color: hsl(var(--accent) / .55); background: hsl(var(--accent) / .08); }
     .route.blocked { border-color: hsl(var(--destructive) / .5); background: hsl(var(--destructive) / .06); }
     .route.warned { border-color: hsl(var(--warning) / .5); background: hsl(var(--warning) / .09); }
-    .route h3 { margin: 10px 0; font-size: 18px; font-weight: 600; }
+    .route h4 { margin: 10px 0; font-size: 18px; font-weight: 600; }
     .route p { color: hsl(var(--muted-foreground)); line-height: 1.5; margin: 0; font-size: 14px; }
     .note { border: 1px solid hsl(var(--primary) / .25); border-radius: 10px; padding: 14px; background: hsl(var(--primary) / .06); color: hsl(var(--foreground)); line-height: 1.55; font-size: 14px; }
     .note b { color: hsl(var(--foreground)); }
@@ -268,27 +391,87 @@
     .walkthrough-step.active { border-color: hsl(var(--primary) / .55); color: hsl(var(--foreground)); background: hsl(var(--primary) / .10); }
     .walkthrough-step.active b { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
     .walkthrough-copy { display: grid; gap: 10px; }
-    .walkthrough-copy h3 { margin: 0; font-size: 18px; letter-spacing: -.01em; }
+    .walkthrough-copy h4 { margin: 0; font-size: 18px; letter-spacing: -.01em; }
     .walkthrough-copy p { margin: 0; color: hsl(var(--muted-foreground)); line-height: 1.55; font-size: 14px; }
+    .walkthrough-actions { display: flex; flex-wrap: wrap; gap: 12px; }
     .receipt-card { margin-top: 14px; border: 1px solid hsl(var(--accent) / .38); border-radius: 12px; padding: 14px; background: hsl(var(--accent) / .08); }
-    .receipt-card h3 { margin: 0 0 10px; color: hsl(var(--success-fg)); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    .receipt-card h4 { margin: 0 0 10px; color: hsl(var(--success-fg)); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
     .receipt-card .field { grid-template-columns: 160px minmax(0, 1fr); }
-    .footer-note { color: hsl(var(--muted-foreground)); text-align: center; font-size: 12px; line-height: 1.45; padding: 16px; }
+    .console-footnote { color: hsl(var(--muted-foreground)); font-size: 12.5px; line-height: 1.55; }
+
+    /* ---------- Working application band ---------- */
+    .app-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 38px; }
+    .app-card { border: 1px solid hsl(var(--sidebar-border)); border-radius: 14px; background: hsl(222 47% 9% / .85); padding: 20px; display: grid; gap: 10px; align-content: start; }
+    .app-card h3 { margin: 0; font-size: 15.5px; letter-spacing: -.01em; color: hsl(210 20% 96%); }
+    .app-card p { margin: 0; font-size: 13px; line-height: 1.6; }
+    .chain {
+      display: inline-block; padding: 8px 12px; border: 1px solid hsl(var(--sidebar-border)); border-radius: 8px;
+      background: hsl(222 47% 6% / .8); color: hsl(172 66% 62%); font-size: 12px; font-weight: 600;
+      letter-spacing: .01em; overflow-wrap: anywhere;
+    }
+    .app-rails { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 28px; }
+    .app-run { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 18px; align-items: start; margin-top: 28px; }
+    .runbox { border: 1px solid hsl(var(--sidebar-border)); border-radius: 12px; background: hsl(222 47% 6% / .85); overflow: hidden; }
+    .runbox-head { padding: 10px 16px; border-bottom: 1px solid hsl(var(--sidebar-border)); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: hsl(210 20% 65%); }
+    .runbox pre { margin: 0; padding: 16px; color: hsl(210 25% 88%); font-size: 12.5px; line-height: 1.7; overflow: auto; }
+    .runbox pre .cm { color: hsl(215 16% 55%); }
+    .app-run aside p { margin: 0 0 12px; font-size: 13.5px; line-height: 1.65; }
+    .app-run aside p:last-child { margin-bottom: 0; }
+    .app-run aside b { color: hsl(210 20% 94%); }
+
+    /* ---------- Boundary section ---------- */
+    .boundary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 36px; }
+    .boundary-col { border: 1px solid hsl(var(--border)); border-radius: 14px; background: hsl(var(--card)); padding: 22px; }
+    .boundary-col.is { border-top: 3px solid hsl(var(--accent)); }
+    .boundary-col.not { border-top: 3px solid hsl(var(--destructive)); }
+    .boundary-col h3 { margin: 0 0 6px; font-size: 17px; letter-spacing: -.01em; }
+    .boundary-col > p { color: hsl(var(--muted-foreground)); font-size: 13.5px; line-height: 1.55; margin: 0 0 12px; }
+    .boundary-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 9px 0; border-top: 1px solid hsl(var(--border)); font-size: 13.5px; line-height: 1.5; }
+    .boundary-row .light { transform: translateY(1px); }
+    .boundary-aside { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 16px; margin-top: 16px; align-items: start; }
+    /* Claim boundary uses the brand dark-navy panel to signal trust/evidence. */
+    .status-card { border-radius: 14px; padding: 22px; background: hsl(var(--sidebar)); color: hsl(var(--sidebar-foreground)); display: grid; gap: 14px; align-content: start; border: 1px solid hsl(var(--sidebar-border)); }
+    .status-card h3 { font-size: 16px; margin: 0; font-weight: 600; }
+    .status-card p { color: hsl(210 20% 80%); line-height: 1.55; margin: 0; font-size: 13.5px; }
+    .status-grid { display: grid; gap: 6px; }
+    .status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid hsl(var(--sidebar-border)); }
+    .status-row:first-child { border-top: 0; }
+    .status-row > span:first-child { color: hsl(210 20% 78%); font-size: 13px; }
+    .status-card .pill { background: hsl(var(--sidebar-border) / .55); border-color: hsl(var(--sidebar-border)); color: hsl(210 20% 88%); }
+    .status-card .pill.good { color: hsl(172 66% 62%); border-color: hsl(172 66% 50% / .4); background: hsl(172 66% 50% / .14); }
+    .status-card .pill.warn { color: hsl(43 92% 66%); border-color: hsl(43 88% 55% / .4); background: hsl(43 88% 55% / .14); }
+    .status-card .pill.info { color: hsl(199 89% 66%); border-color: hsl(199 89% 55% / .4); background: hsl(199 89% 55% / .14); }
+
+    /* ---------- Footer ---------- */
+    footer { border-top: 1px solid hsl(var(--border)); padding: 34px 0 42px; }
+    .footer-grid { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 18px; }
+    .footer-grid .brand { font-size: 13.5px; }
+    .footer-links { display: flex; flex-wrap: wrap; gap: 2px; }
+    .footer-links a { display: inline-flex; align-items: center; min-height: 40px; padding: 0 10px; color: hsl(var(--muted-foreground)); text-decoration: none; font-size: 13px; border-radius: var(--radius); }
+    .footer-links a:hover { color: hsl(var(--foreground)); background: hsl(var(--secondary)); }
+    .footer-links a:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+    .footer-note { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.55; margin-top: 14px; max-width: 720px; }
+
     .toast { position: fixed; right: 18px; bottom: 18px; max-width: 360px; padding: 13px 15px; border: 1px solid hsl(var(--card-border)); border-radius: 12px; background: hsl(var(--card)); color: hsl(var(--foreground)); box-shadow: 0 8px 28px hsl(222 47% 11% / .12); opacity: 0; visibility: hidden; transform: translateY(12px); transition: opacity .18s ease, transform .18s ease, visibility 0s linear .18s; z-index: 40; pointer-events: none; font-size: 13.5px; }
     .toast.show { opacity: 1; visibility: visible; transform: translateY(0); transition: opacity .18s ease, transform .18s ease; }
 
     @media (max-width: 1060px) {
-      header, .layout { grid-template-columns: 1fr; }
+      .hero-grid, .layout, .app-run { grid-template-columns: 1fr; }
+      .timeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .app-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .stage-grid, .panels, .decision-grid, .walkthrough-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .workspace { min-height: auto; }
+      .nav-links { display: none; }
     }
     @media (max-width: 760px) {
-      .stage-grid, .panels, .decision-grid, .walkthrough-grid { grid-template-columns: 1fr; }
+      .sitenav-wrap { position: static; }
+      .control-strip { top: 0; }
+      .stage-grid, .panels, .decision-grid, .walkthrough-grid, .compare, .boundary-grid, .boundary-aside, .app-grid, .timeline { grid-template-columns: 1fr; }
+      .q { grid-template-columns: 1fr; gap: 6px; }
     }
     @media (max-width: 620px) {
-      .shell { padding: 16px 14px 28px; }
-      .topbar { align-items: flex-start; }
-      .hero { padding: 22px; }
+      .shell { padding: 0 14px; }
+      .console-body { padding: 14px; }
       .field { grid-template-columns: 1fr; gap: 4px; }
       .screen-title { flex-direction: column; align-items: stretch; }
       .screen-title > .pill { align-self: flex-start; }
@@ -298,6 +481,9 @@
       .tab { flex: 1 1 calc(50% - 8px); text-align: center; justify-content: center; }
       .select-wrap { width: 100%; flex-direction: column; align-items: flex-start; }
       select { width: 100%; }
+      .brand span.badge { display: none; }
+      /* Hero CTA and skip link both reach the console; the nav CTA does not fit at phone widths. */
+      .sitenav .btn.primary { display: none; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
@@ -305,157 +491,381 @@
   </style>
 </head>
 <body>
-  <div class="shell">
-    <div class="topbar">
-      <div class="brandline"><span class="dot-mark" aria-hidden="true"></span><span>Public reference demo</span><span class="badge info">browser-only</span><span class="badge warn">synthetic data</span></div>
-      <div class="topbar-right">
-        <span class="mono">Demo build: 2026-07-10-public-reference-v1</span>
-        <button class="theme-toggle" id="themeToggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+  <a class="skip-link" href="#console">Skip to demo console</a>
+
+  <div class="sitenav-wrap">
+    <nav class="shell sitenav" aria-label="Site">
+      <span class="brand"><span class="dot-mark" aria-hidden="true"></span>Settlement Endpoint Control Tower <span class="badge info">public reference demo</span></span>
+      <div class="nav-links">
+        <a href="#problem">Problem</a>
+        <a href="#moment">Control moment</a>
+        <a href="#console">Demo console</a>
+        <a href="#application">Working application</a>
+        <a href="#boundary">Boundary</a>
+      </div>
+      <div class="nav-right">
+        <button class="theme-toggle" id="themeToggle" type="button" aria-pressed="false" aria-label="Dark mode" title="Switch to dark mode">
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
-          <span class="label-dark">Dark</span><span class="label-light">Light</span>
+          <span>Dark mode</span>
         </button>
+        <a class="btn primary" href="#console">Open demo console</a>
       </div>
-    </div>
+    </nav>
+  </div>
 
-    <header>
-      <section class="hero">
-        <div class="eyebrow">Settlement Endpoint Control Tower</div>
-        <h1><span class="hl">Identity-bound endpoints</span> before value moves.</h1>
-        <p class="subtitle">A production-shaped, synthetic demo for banks to pre-validate tokenized settlement endpoints beside BIC, LEI/vLEI-style authority, fiat SSI fallback and ISO/UETR-style traceability.</p>
+  <header id="hero" class="band">
+    <div class="shell hero-grid">
+      <div>
+        <p class="eyebrow">Synthetic data &middot; browser-only &middot; no backend calls</p>
+        <h1>A wallet address is <span class="hl">not a settlement instruction</span>.</h1>
+        <p class="lede">Banks govern fiat settlement instructions: who owns the account, which institution services it, which intermediary applies, how it changes. Settlement Endpoint Control Tower applies the same discipline to wallet and token endpoints &mdash; identity, authority, custody context, policy evidence, and a preserved fiat fallback &mdash; decided and recorded before value moves.</p>
         <div class="hero-actions">
-          <button class="btn primary" data-action="walkthrough">Start Guided Walkthrough</button>
-          <button class="btn" data-goto="validation">Run pre-validation</button>
+          <button class="btn primary" data-action="replayMoment">Replay the control moment</button>
+          <a class="btn" href="#console">Explore the demo console</a>
           <button class="btn" data-action="downloadReceipt">Download evidence receipt</button>
         </div>
-      </section>
-      <aside class="status-card" aria-label="Demo boundary">
-        <h2>Public demo boundary</h2>
-        <p>No real payments, no live payment-network integration, no live wallet ownership check, no live legal-entity or authority verification, and no proprietary reference-data rows. This models the control workflow using synthetic data only.</p>
-        <div class="status-grid">
-          <div class="status-row"><span>Data</span><span class="pill warn">synthetic fixture</span></div>
-          <div class="status-row"><span>Runtime</span><span class="pill info">static browser app</span></div>
-          <div class="status-row"><span>Network calls</span><span class="pill good">none</span></div>
-          <div class="status-row"><span>Public posture</span><span class="pill good">claim-safe</span></div>
+        <div class="hero-chips">
+          <span class="pill warn">synthetic data only</span>
+          <span class="pill info">static browser app</span>
+          <span class="pill good">no network calls</span>
+          <span class="pill good">no telemetry</span>
         </div>
-      </aside>
-    </header>
+      </div>
+      <div class="ticket" role="img" aria-label="Synthetic route decision: beneficiary identity and fiat fallback pass, endpoint control evidence fails, token route blocked with fiat fallback selected">
+        <div class="ticket-head"><span>Route decision &middot; synthetic fixture</span><span class="mono">UETR SYN-2026-000184</span></div>
+        <div class="ticket-rows">
+          <div class="ticket-row"><span class="light good"></span><span><b>Beneficiary identity</b><small>Northstar Components GmbH &middot; LEI 549300SYNTHETIC01</small></span><span class="pill good">pass</span></div>
+          <div class="ticket-row"><span class="light good"></span><span><b>Fiat SSI fallback</b><small>EUR &middot; DE&bull;&bull; &bull;&bull;&bull;&bull; &bull;&bull;&bull;&bull; 4400 &middot; INTERDEFFXXX</small></span><span class="pill good">usable</span></div>
+          <div class="ticket-row"><span class="light warn"></span><span><b>Authority evidence</b><small>vLEI-style, expiring soon &mdash; refresh before token use</small></span><span class="pill warn">watch</span></div>
+          <div class="ticket-row"><span class="light bad"></span><span><b>Wallet allowlist</b><small>Stale for the requested counterparty and rail</small></span><span class="pill bad">fail</span></div>
+          <div class="ticket-row"><span class="light bad"></span><span><b>Endpoint-control payload</b><small>Required wallet-control field incomplete</small></span><span class="pill bad">fail</span></div>
+        </div>
+        <div class="ticket-verdict mono"><span>Verdict</span>TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED</div>
+        <div class="ticket-foot"><span>Token route blocked</span><span>Fiat fallback selected</span><span>Repair task opened</span><span>Evidence recorded</span></div>
+      </div>
+    </div>
+  </header>
 
-    <main>
-      <nav class="control-strip" aria-label="Demo controls">
-        <div class="tabs" role="tablist" aria-label="Demo screens">
-          <button class="tab" role="tab" data-screen="profile" aria-selected="true">1. endpoint profile</button>
-          <button class="tab" role="tab" data-screen="validation" aria-selected="false">2. pre-validation</button>
-          <button class="tab" role="tab" data-screen="decision" aria-selected="false">3. route decision</button>
-          <button class="tab" role="tab" data-screen="audit" aria-selected="false">4. evidence and audit</button>
+  <main>
+    <section id="problem" class="section" aria-labelledby="problem-title">
+      <div class="shell">
+        <div>
+          <p class="section-mark"><span class="idx mono">01</span> The problem</p>
+          <h2 id="problem-title">Two rails. Only one of them is governed.</h2>
+          <p class="section-lede">A fiat standing settlement instruction is a governed object: it names the beneficiary institution and account, the intermediary chain and the currency, and it changes under review. A token endpoint, as commonly handled, is a pasted string &mdash; no proven controller, no authority trail, no freshness policy, and no recorded reason for the route a payment ends up taking.</p>
         </div>
-        <div class="controls">
-          <label class="select-wrap">Scenario
-            <select id="scenarioSelect" aria-label="Scenario">
-              <option value="blocked">Blocked wallet endpoint</option>
-              <option value="refreshed">Refreshed endpoint approved</option>
-              <option value="authority">Authority evidence expired</option>
-            </select>
-          </label>
-          <label class="select-wrap">Role
-            <select id="roleSelect" aria-label="Role">
-              <option value="operator">Ops analyst</option>
-              <option value="risk">Risk reviewer</option>
-              <option value="approver">Four-eyes approver</option>
-            </select>
-          </label>
-          <button class="btn" data-action="reset">Reset</button>
+        <div class="compare">
+          <div class="compare-col governed">
+            <h3>Fiat settlement instruction</h3>
+            <p>What an institution already knows before releasing a fiat payment.</p>
+            <div class="trait"><span class="light good" aria-hidden="true"></span><span>Beneficiary institution identified by BIC, entity by LEI.</span></div>
+            <div class="trait"><span class="light good" aria-hidden="true"></span><span>Account and intermediary chain held under mandate.</span></div>
+            <div class="trait"><span class="light good" aria-hidden="true"></span><span>Changes are reviewed, versioned, and recorded.</span></div>
+            <div class="trait"><span class="light good" aria-hidden="true"></span><span>Route decisions are traceable end to end.</span></div>
+          </div>
+          <div class="compare-col exposed">
+            <h3>Token endpoint, as commonly handled</h3>
+            <p>What an institution typically knows about a wallet address it was sent.</p>
+            <div class="trait"><span class="light bad" aria-hidden="true"></span><span>An address pasted from a message or a portal.</span></div>
+            <div class="trait"><span class="light bad" aria-hidden="true"></span><span>Controlling institution and legal entity unproven.</span></div>
+            <div class="trait"><span class="light bad" aria-hidden="true"></span><span>Authority evidence absent, stale, or unverifiable.</span></div>
+            <div class="trait"><span class="light bad" aria-hidden="true"></span><span>Custody, network, and token context left implicit.</span></div>
+          </div>
         </div>
-      </nav>
+        <div class="qlist">
+          <h3>Five questions before value moves</h3>
+          <div class="q"><b>Control</b><span>Which institution and legal entity control this endpoint?</span></div>
+          <div class="q"><b>Authority</b><span>Who has authority over it &mdash; and is that evidence current?</span></div>
+          <div class="q"><b>Context</b><span>Which wallet, custody, network, and token context applies?</span></div>
+          <div class="q"><b>Fallback</b><span>Which fiat instruction remains usable if the token route is not eligible?</span></div>
+          <div class="q"><b>Evidence</b><span>What recorded evidence will explain this route decision later?</span></div>
+        </div>
+        <p class="q-close"><b>The control tower makes these answers a precondition, not an afterthought.</b> Endpoints become governed settlement instructions with an owner, an authority trail, graded policy evidence, and an explainable route decision.</p>
+      </div>
+    </section>
 
-      <section class="card walkthrough-panel" aria-label="Guided walkthrough">
-        <div class="card-head"><h2>Guided walkthrough</h2><span id="walkthroughBadge" class="pill info">step 1 of 4</span></div>
-        <div class="card-body walkthrough-grid">
-          <div class="walkthrough-steps" id="walkthroughSteps" aria-label="Guided walkthrough steps"></div>
-          <div class="walkthrough-copy">
-            <h3 id="walkthroughTitle">Beneficiary endpoint profile</h3>
-            <p id="walkthroughNarration">Start here: the beneficiary has a valid fiat SSI, but the tokenized settlement endpoint needs identity-bound control evidence before value moves.</p>
-            <div class="hero-actions">
-              <button class="btn primary" data-action="walkthrough">Start Guided Walkthrough</button>
-              <button class="btn" data-action="nextGuided">Next walkthrough step</button>
-              <button class="btn" data-action="downloadReceipt">Download evidence receipt</button>
+    <section id="moment" class="section tint" aria-labelledby="moment-title">
+      <div class="shell">
+        <div>
+          <p class="section-mark"><span class="idx mono">02</span> The control moment</p>
+          <h2 id="moment-title">The beneficiary is valid. The endpoint still is not safe.</h2>
+          <p class="section-lede">The defining moment this product exists for: identity checks pass and the fiat instruction is usable, but the requested token endpoint lacks current control evidence. The control tower blocks that route, explains the gap, selects the governed fiat fallback as the recommended route, and records why.</p>
+        </div>
+        <div class="timeline">
+          <div class="tl-step"><span class="num" aria-hidden="true">1</span><h3>Instruction arrives</h3><p>A tokenized-deposit settlement is requested. Institution and legal-entity identity check out; the fiat SSI is usable.</p></div>
+          <div class="tl-step"><span class="num" aria-hidden="true">2</span><h3>Evidence graded</h3><p>Endpoint control evidence is graded against policy: the wallet allowlist is stale for this rail and the endpoint-control payload is incomplete.</p></div>
+          <div class="tl-step fail"><span class="num" aria-hidden="true">3</span><h3>Token route blocked</h3><p>The route is blocked &mdash; not because the counterparty is bad, but because current control evidence does not exist.</p></div>
+          <div class="tl-step save"><span class="num" aria-hidden="true">4</span><h3>Fiat fallback selected</h3><p>The instruction is not stranded: the governed fiat SSI fallback is selected and remains traceable.</p></div>
+          <div class="tl-step"><span class="num" aria-hidden="true">5</span><h3>Evidence recorded</h3><p>Verdict, failed checks, and audit events are recorded, and a repair task names each control to repair.</p></div>
+        </div>
+        <div class="moment-verdict">
+          <span class="mono">TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED</span>
+          <small>One verdict string carries the whole story: what was blocked, what was preserved, and where the evidence lives.</small>
+        </div>
+        <div class="moment-actions">
+          <button class="btn primary" data-action="replayMoment">Replay the control moment</button>
+          <small>Deterministic and synthetic &mdash; the same scenario replays identically, every time.</small>
+        </div>
+      </div>
+    </section>
+
+    <section id="console" class="section" aria-labelledby="console-title">
+      <div class="shell">
+        <div>
+          <p class="section-mark"><span class="idx mono">03</span> Demo console</p>
+          <h2 id="console-title">The public demo console</h2>
+          <p class="section-lede">Everything below runs in your browser: a static, deterministic model of the control workflow on synthetic data. Four operating views, three authored scenarios, three role perspectives &mdash; perspectives change the framing, they do not enforce authorization. The evidence receipt is generated client-side.</p>
+        </div>
+        <div class="console-frame">
+          <div class="console-chrome">
+            <span><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="chrome-title">SECT demo console &mdash; synthetic session</span></span>
+            <span class="chrome-right"><span class="badge info">browser-only</span><span class="badge warn">synthetic data</span><span class="mono">UETR SYN-2026-000184</span></span>
+          </div>
+          <div class="console-body">
+            <nav class="control-strip" aria-label="Demo controls">
+              <div class="tabs" role="tablist" aria-label="Demo screens">
+                <button class="tab" role="tab" data-screen="profile" aria-selected="true" tabindex="0" aria-controls="view-profile">1. endpoint profile</button>
+                <button class="tab" role="tab" data-screen="validation" aria-selected="false" tabindex="-1" aria-controls="view-validation">2. pre-validation</button>
+                <button class="tab" role="tab" data-screen="decision" aria-selected="false" tabindex="-1" aria-controls="view-decision">3. route decision</button>
+                <button class="tab" role="tab" data-screen="audit" aria-selected="false" tabindex="-1" aria-controls="view-audit">4. evidence and audit</button>
+              </div>
+              <div class="controls">
+                <label class="select-wrap">Scenario
+                  <select id="scenarioSelect" aria-label="Scenario">
+                    <option value="blocked">Blocked wallet endpoint</option>
+                    <option value="refreshed">Refreshed endpoint approved</option>
+                    <option value="authority">Authority evidence expired</option>
+                  </select>
+                </label>
+                <label class="select-wrap">Role
+                  <select id="roleSelect" aria-label="Role perspective (view framing only, not authorization)">
+                    <option value="operator">Ops analyst</option>
+                    <option value="risk">Risk reviewer</option>
+                    <option value="approver">Four-eyes approver</option>
+                  </select>
+                </label>
+                <button class="btn" data-action="reset">Reset</button>
+              </div>
+            </nav>
+
+            <section class="card walkthrough-panel" aria-label="Guided walkthrough">
+              <div class="card-head"><h3>Guided walkthrough</h3><span id="walkthroughBadge" class="pill info">step 1 of 4</span></div>
+              <div class="card-body walkthrough-grid">
+                <div class="walkthrough-steps" id="walkthroughSteps" aria-label="Guided walkthrough steps"></div>
+                <div class="walkthrough-copy">
+                  <h4 id="walkthroughTitle">Beneficiary endpoint profile</h4>
+                  <p id="walkthroughNarration">Start here: the beneficiary has a valid fiat SSI, but the tokenized settlement endpoint needs identity-bound control evidence before value moves.</p>
+                  <div class="walkthrough-actions">
+                    <button class="btn primary" data-action="walkthrough">Start Guided Walkthrough</button>
+                    <button class="btn" data-action="nextGuided">Next walkthrough step</button>
+                    <button class="btn" data-action="downloadReceipt">Download evidence receipt</button>
+                  </div>
+                  <div class="receipt-card" aria-label="Evidence receipt summary">
+                    <h4>Evidence Receipt</h4>
+                    <div class="field"><span>Receipt ID</span><span class="mono" id="receiptId">SECT-SYN-2026-000184</span></div>
+                    <div class="field"><span>Current verdict</span><span id="receiptVerdict">TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED</span></div>
+                    <div class="field"><span>Download</span><span class="mono">settlement-endpoint-evidence.json</span></div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="layout">
+              <aside class="card side-stack" aria-label="Payment context">
+                <div class="card-head"><h3>Payment context</h3><span id="contextPill" class="pill bad">fallback selected</span></div>
+                <div class="card-body kv">
+                  <div class="kv-row"><div class="label">Debtor bank</div><div class="value">Atlas Bank Singapore</div><div class="detail mono">ATLASGSGXXX</div></div>
+                  <div class="kv-row"><div class="label">Beneficiary entity</div><div class="value">Northstar Components GmbH</div><div class="detail mono">LEI 549300SYNTHETIC01</div></div>
+                  <div class="kv-row"><div class="label">Beneficiary institution</div><div class="value">Meridian Bank Europe</div><div class="detail mono">MERIDEFFXXX</div></div>
+                  <div class="kv-row"><div class="label">Requested rail</div><div class="value">Tokenized deposit</div><div class="detail">Permissioned network. Custody and endpoint-control checks required.</div></div>
+                  <div class="kv-row"><div class="label">Fallback rail</div><div class="value">Fiat SSI route available</div><div class="detail mono">EUR &middot; DE&bull;&bull; &bull;&bull;&bull;&bull; &bull;&bull;&bull;&bull; 4400 &middot; UETR SYN-2026-000184</div></div>
+                  <div class="note"><b>Demo point:</b> the beneficiary is not invalid. The fiat SSI is usable. The digital endpoint may still be unsafe for tokenized settlement until fresh endpoint evidence exists.</div>
+                </div>
+              </aside>
+
+              <section class="card workspace" aria-live="polite">
+                <div class="card-body">
+                  <section id="view-profile" class="view active" role="tabpanel" aria-label="Endpoint profile view">
+                    <div class="screen-title"><div><h3>Counterparty settlement endpoint profile</h3><p>One operations surface joins the traditional settlement identity layer with the digital endpoint layer.</p></div><span id="profileBadge" class="pill warn">pre-release</span></div>
+                    <div class="stage-grid">
+                      <div class="stage"><b>1. Source</b><small>Institution, entity, endpoint and fallback SSI profile loaded.</small></div>
+                      <div class="stage"><b>2. Controls</b><small>Freshness, authority, custody, Travel Rule and rail policy checks.</small></div>
+                      <div class="stage"><b>3. Decision</b><small>Approve token rail, select fallback or hold for remediation.</small></div>
+                      <div class="stage"><b>4. Evidence</b><small>Exportable audit trail for guided walkthrough and ops review.</small></div>
+                    </div>
+                    <div class="panels">
+                      <div class="panel"><h4>Institution layer</h4><div class="field"><span>BIC</span><span class="mono">MERIDEFFXXX</span></div><div class="field"><span>Role</span><span>Creditor agent and fallback SSI holder</span></div><div class="field"><span>Reachability</span><span>Synthetic institution-reachability evidence</span></div><div class="field"><span>Jurisdiction</span><span>EU synthetic profile</span></div></div>
+                      <div class="panel"><h4>Legal entity layer</h4><div class="field"><span>LEI</span><span class="mono">549300SYNTHETIC01</span></div><div class="field"><span>Entity</span><span>Northstar Components GmbH</span></div><div class="field"><span>Authority</span><span id="authorityField">vLEI-style evidence expiring soon</span></div><div class="field"><span>Maintainer</span><span>Four-eyes treasury operations</span></div></div>
+                      <div class="panel"><h4>Digital endpoint</h4><div class="field"><span>Wallet</span><span class="mono">0x71...9F4A</span></div><div class="field"><span>Custody</span><span id="custodyField">Approved custodian, evidence required</span></div><div class="field"><span>Allowlist</span><span id="allowlistField">Stale, refresh required</span></div><div class="field"><span>Endpoint owner</span><span id="ownerField">Treasury ops queue</span></div></div>
+                      <div class="panel"><h4>Fiat fallback SSI</h4><div class="field"><span>Currency</span><span>EUR</span></div><div class="field"><span>Account</span><span class="mono">DE&bull;&bull; &bull;&bull;&bull;&bull; &bull;&bull;&bull;&bull; 4400</span></div><div class="field"><span>Intermediary</span><span class="mono">INTERDEFFXXX</span></div><div class="field"><span>Status</span><span>Approved fallback route</span></div></div>
+                    </div>
+                  </section>
+
+                  <section id="view-validation" class="view" role="tabpanel" aria-label="Pre-validation view">
+                    <div class="screen-title"><div><h3>Endpoint pre-validation</h3><p>Checks run before release. The product validates route readiness, not just field syntax.</p></div><span id="validationBadge" class="pill bad">blocked</span></div>
+                    <div class="checks" id="checkList"></div>
+                    <div class="note" id="roleNote" style="margin-top:14px"></div>
+                  </section>
+
+                  <section id="view-decision" class="view" role="tabpanel" aria-label="Route decision view">
+                    <div class="screen-title"><div><h3>Policy route decision</h3><p>The control tower gives operations an auditable route verdict and repair path.</p></div><span id="decisionBadge" class="pill bad">fallback selected</span></div>
+                    <div class="decision-grid">
+                      <article id="tokenRoute" class="route blocked"><span class="pill info">requested rail</span><h4>Tokenized deposit route</h4><p id="tokenRouteText">Blocked pending endpoint repair.</p></article>
+                      <article id="fiatRoute" class="route selected"><span class="pill info">fallback rail</span><h4>Fiat SSI fallback</h4><p id="fiatRouteText">Selected while endpoint evidence is repaired.</p></article>
+                    </div>
+                    <div class="note" id="repairText" style="margin-top:14px"></div>
+                  </section>
+
+                  <section id="view-audit" class="view" role="tabpanel" aria-label="Evidence and audit view">
+                    <div class="screen-title"><div><h3>Evidence and audit pack</h3><p>Exportable audit trace showing profile source, failed or passed controls, route decision and next operator action.</p></div><span class="pill good mono">UETR SYN-2026-000184</span></div>
+                    <div class="ledger" id="auditList"></div>
+                    <div class="walkthrough-actions" style="margin-top:14px">
+                      <button class="btn primary" data-action="downloadReceipt">Download evidence receipt</button>
+                      <button class="btn" data-action="download">Download synthetic evidence JSON</button>
+                      <button class="btn" data-action="copy">Copy UETR</button>
+                    </div>
+                    <div class="evidence-box"><pre id="evidenceJson"></pre></div>
+                  </section>
+                </div>
+              </section>
+            </section>
+
+            <p class="console-footnote">Scenario &ldquo;approved&rdquo; means the authored synthetic scenario is eligible &mdash; not a real payment or compliance authorization. Role controls are perspectives, not permissions. Nothing on this page performs a live check or leaves your browser.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="application" class="band section" aria-labelledby="application-title">
+      <div class="shell">
+        <div>
+          <p class="section-mark"><span class="idx mono">04</span> Working application</p>
+          <h2 id="application-title">Behind this page: a working control plane</h2>
+          <p class="section-lede">The console above is authored proof of the workflow. The same repository ships the deeper proof: a <b>localhost reference implementation</b> &mdash; a SQLite-backed application that computes deterministic advisory outputs from persisted synthetic evidence. It is synthetic operational-depth proof, not a hosted product: it binds only to 127.0.0.1 on the operator&rsquo;s machine, and this public page never calls it.</p>
+        </div>
+        <div class="app-grid">
+          <div class="app-card">
+            <span class="chain mono">fields in &rarr; six checks &rarr; advisory verdict</span>
+            <h3>Deterministic evaluator</h3>
+            <p>A deterministic evaluator grades six policy checks &mdash; institution, legal entity, authority, allowlist, payload, fallback &mdash; from persisted synthetic fields, never from a scenario label, and returns an advisory approve, hold, or block route verdict. Unknown or unsupported input never approves; it holds.</p>
+          </div>
+          <div class="app-card">
+            <span class="chain mono">draft &rarr; active &rarr; superseded</span>
+            <h3>Endpoint profile lifecycle</h3>
+            <p>Profiles carry a controlled lifecycle. Drafts are editable; activation freezes them; supersession is one atomic replacement that links the old profile to its successor. There is no delete route &mdash; superseded profiles keep their full decision and audit history.</p>
+          </div>
+          <div class="app-card">
+            <span class="chain mono">open &rarr; evidence refresh &rarr; resolved</span>
+            <h3>Repair and evidence refresh</h3>
+            <p>An active profile whose latest decision is a hold can open a persisted repair task. Refreshed authority, allowlist, and payload evidence lands on the task &mdash; one live repair at a time, and out-of-order or replayed steps fail closed with no partial write.</p>
+          </div>
+          <div class="app-card">
+            <span class="chain mono">refreshed evidence &rarr; decision v(N+1)</span>
+            <h3>Deterministic revalidation</h3>
+            <p>Revalidation recomputes the decision from the refreshed persisted evidence over the profile&rsquo;s activation-frozen fields and records it as a new linked decision version that supersedes &mdash; never overwrites &mdash; the baseline. The same refreshed evidence always yields the same verdict.</p>
+          </div>
+          <div class="app-card">
+            <span class="chain mono">v1 &rarr; v2 &rarr; &hellip; &rarr; vN</span>
+            <h3>Append-only decision history</h3>
+            <p>Decision history is append-only through the localhost application API: each revalidation records a new linked decision version, and the API exposes no overwrite path. Prior decisions stay queryable after repair, and the version chain records exactly which decision superseded which &mdash; the advisory surface promotes the latest, history keeps the rest.</p>
+          </div>
+          <div class="app-card">
+            <span class="chain mono">schema v1 &rarr; &hellip; &rarr; v6</span>
+            <h3>Fail-closed local plumbing</h3>
+            <p>Nondestructive, versioned schema migrations through v6; a loopback-only HTTP boundary with strict, bounded JSON writes; structured request logs that never carry payloads; and one canonical quality gate covering the whole repository.</p>
+          </div>
+        </div>
+        <div class="app-rails" aria-label="Working application boundary">
+          <span class="pill">localhost-only</span>
+          <span class="pill">synthetic-only</span>
+          <span class="pill">advisory decisions</span>
+          <span class="pill">no authentication</span>
+          <span class="pill">no RBAC or tenancy</span>
+          <span class="pill">no live providers</span>
+          <span class="pill">no payment execution</span>
+        </div>
+        <div class="app-run">
+          <div class="runbox">
+            <div class="runbox-head">Run it from the repository</div>
+            <pre class="mono"><span class="cm"># destructive demo reset: seed.py replaces demo-db/data/demo.sqlite</span>
+<span class="cm"># use only in a disposable checkout or after making a backup</span>
+python3 demo-db/seed.py
+python3 demo-db/app.py --host 127.0.0.1 --port 4188
+<span class="cm"># then open 127.0.0.1:4188 in a local browser</span>
+<span class="cm"># one canonical quality gate for the whole project:</span>
+python3 ci.py</pre>
+          </div>
+          <aside>
+            <p><b>Why two surfaces?</b> The public console proves the workflow is coherent; the localhost application proves the mechanics hold under persistence &mdash; lifecycle rails, one-open repair, deterministic revalidation, versioned decisions, and nondestructive versioned migrations.</p>
+            <p>The application is not exposed here and holds no real data: no live identity, authority, or wallet verification, and no connection to any payment network. Every decision it records is advisory, computed from synthetic fixtures.</p>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="boundary" class="section" aria-labelledby="boundary-title">
+      <div class="shell">
+        <div>
+          <p class="section-mark"><span class="idx mono">05</span> Claim boundary</p>
+          <h2 id="boundary-title">What this is &mdash; and what it is not</h2>
+          <p class="section-lede">Claim discipline is part of the product story: a control tower that overstates its own evidence would fail its own test. Every identifier on this page is synthetic, and every capability claim is scoped to what actually runs.</p>
+        </div>
+        <div class="boundary-grid">
+          <div class="boundary-col is">
+            <h3>This is</h3>
+            <p>What actually runs, and where.</p>
+            <div class="boundary-row"><span class="light good" aria-hidden="true"></span><span>A public, static, synthetic reference demo of the control workflow.</span></div>
+            <div class="boundary-row"><span class="light good" aria-hidden="true"></span><span>Deterministic authored scenarios with coherent verdicts and audit trails.</span></div>
+            <div class="boundary-row"><span class="light good" aria-hidden="true"></span><span>A client-side synthetic evidence receipt you can download and inspect.</span></div>
+            <div class="boundary-row"><span class="light good" aria-hidden="true"></span><span>A localhost reference implementation in the same repository, run only by its operator.</span></div>
+          </div>
+          <div class="boundary-col not">
+            <h3>This is not</h3>
+            <p>Nothing here performs a live operation of any kind.</p>
+            <div class="boundary-row"><span class="light bad" aria-hidden="true"></span><span>Not live verification of identity, authority, or wallet ownership.</span></div>
+            <div class="boundary-row"><span class="light bad" aria-hidden="true"></span><span>Not payment execution, provider integration, or sanctions or chain screening.</span></div>
+            <div class="boundary-row"><span class="light bad" aria-hidden="true"></span><span>Not a certification, endorsement, or production-compliance statement.</span></div>
+            <div class="boundary-row"><span class="light bad" aria-hidden="true"></span><span>Not authentication, enforced four-eyes, RBAC, tenancy, or hosted persistence.</span></div>
+          </div>
+        </div>
+        <div class="boundary-aside">
+          <div class="card">
+            <div class="card-head"><h3>Public-safe wording</h3><span class="pill good">claim-safe</span></div>
+            <div class="card-body note">Settlement Endpoint Control Tower is a synthetic reference demo. It shows how banks could pre-validate identity-bound wallet endpoints beside BIC, LEI/vLEI-style authority, fiat SSI fallback and ISO/UETR-style visibility. It does not claim live payment execution, live payment-network integration, live legal-entity or authority verification, live wallet ownership verification or production compliance. Scenario &ldquo;approved&rdquo; means the authored synthetic scenario is eligible, and role controls are perspectives &mdash; not authorization enforcement.</div>
+          </div>
+          <aside class="status-card" aria-label="Demo boundary">
+            <h3>Public demo boundary</h3>
+            <p>No real payments, no live payment-network integration, no live wallet ownership check, no live legal-entity or authority verification, and no proprietary reference-data rows. This models the control workflow using synthetic data only.</p>
+            <div class="status-grid">
+              <div class="status-row"><span>Data</span><span class="pill warn">synthetic fixture</span></div>
+              <div class="status-row"><span>Runtime</span><span class="pill info">static browser app</span></div>
+              <div class="status-row"><span>Network calls</span><span class="pill good">none</span></div>
+              <div class="status-row"><span>Public posture</span><span class="pill good">claim-safe</span></div>
             </div>
-            <div class="receipt-card" aria-label="Evidence receipt summary">
-              <h3>Evidence Receipt</h3>
-              <div class="field"><span>Receipt ID</span><span class="mono" id="receiptId">SECT-SYN-2026-000184</span></div>
-              <div class="field"><span>Current verdict</span><span id="receiptVerdict">TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED</span></div>
-              <div class="field"><span>Download</span><span class="mono">settlement-endpoint-evidence.json</span></div>
-            </div>
-          </div>
+          </aside>
         </div>
-      </section>
+      </div>
+    </section>
+  </main>
 
-      <section class="layout">
-        <aside class="card side-stack" aria-label="Payment context">
-          <div class="card-head"><h2>Payment context</h2><span id="contextPill" class="pill bad">fallback selected</span></div>
-          <div class="card-body kv">
-            <div class="kv-row"><div class="label">Debtor bank</div><div class="value">Atlas Bank Singapore</div><div class="detail mono">ATLASGSGXXX</div></div>
-            <div class="kv-row"><div class="label">Beneficiary entity</div><div class="value">Northstar Components GmbH</div><div class="detail mono">LEI 549300SYNTHETIC01</div></div>
-            <div class="kv-row"><div class="label">Beneficiary institution</div><div class="value">Meridian Bank Europe</div><div class="detail mono">MERIDEFFXXX</div></div>
-            <div class="kv-row"><div class="label">Requested rail</div><div class="value">Tokenized deposit</div><div class="detail">Permissioned network. Custody and endpoint-control checks required.</div></div>
-            <div class="kv-row"><div class="label">Fallback rail</div><div class="value">Fiat SSI route available</div><div class="detail mono">EUR · DE•• •••• •••• 4400 · UETR SYN-2026-000184</div></div>
-            <div class="note"><b>Demo point:</b> the beneficiary is not invalid. The fiat SSI is usable. The digital endpoint may still be unsafe for tokenized settlement until fresh endpoint evidence exists.</div>
-          </div>
-        </aside>
+  <footer>
+    <div class="shell">
+      <div class="footer-grid">
+        <span class="brand"><span class="dot-mark" aria-hidden="true"></span>Settlement Endpoint Control Tower</span>
+        <div class="footer-links">
+          <a href="#problem">Problem</a>
+          <a href="#moment">Control moment</a>
+          <a href="#console">Demo console</a>
+          <a href="#application">Working application</a>
+          <a href="#boundary">Boundary</a>
+        </div>
+        <span class="mono" style="font-size:12px; color:hsl(var(--muted-foreground))">Demo build: 2026-07-11-public-landing-v2</span>
+      </div>
+      <p class="footer-note">Public synthetic reference demo. No data collection, no forms, no payment submission, no backend calls, no telemetry, no third-party scripts, no remote assets. All institutions, entities, accounts, wallets, and identifiers shown are synthetic fixtures.</p>
+    </div>
+  </footer>
 
-        <section class="card workspace" aria-live="polite">
-          <div class="card-body">
-            <section id="view-profile" class="view active">
-              <div class="screen-title"><div><h2>Counterparty settlement endpoint profile</h2><p>One operations surface joins the traditional settlement identity layer with the digital endpoint layer.</p></div><span id="profileBadge" class="pill warn">pre-release</span></div>
-              <div class="stage-grid">
-                <div class="stage"><b>1. Source</b><small>Institution, entity, endpoint and fallback SSI profile loaded.</small></div>
-                <div class="stage"><b>2. Controls</b><small>Freshness, authority, custody, Travel Rule and rail policy checks.</small></div>
-                <div class="stage"><b>3. Decision</b><small>Approve token rail, select fallback or hold for remediation.</small></div>
-                <div class="stage"><b>4. Evidence</b><small>Exportable audit trail for guided walkthrough and ops review.</small></div>
-              </div>
-              <div class="panels">
-                <div class="panel"><h3>Institution layer</h3><div class="field"><span>BIC</span><span class="mono">MERIDEFFXXX</span></div><div class="field"><span>Role</span><span>Creditor agent and fallback SSI holder</span></div><div class="field"><span>Reachability</span><span>Synthetic institution-reachability evidence</span></div><div class="field"><span>Jurisdiction</span><span>EU synthetic profile</span></div></div>
-                <div class="panel"><h3>Legal entity layer</h3><div class="field"><span>LEI</span><span class="mono">549300SYNTHETIC01</span></div><div class="field"><span>Entity</span><span>Northstar Components GmbH</span></div><div class="field"><span>Authority</span><span id="authorityField">vLEI-style evidence expiring soon</span></div><div class="field"><span>Maintainer</span><span>Four-eyes treasury operations</span></div></div>
-                <div class="panel"><h3>Digital endpoint</h3><div class="field"><span>Wallet</span><span class="mono">0x71...9F4A</span></div><div class="field"><span>Custody</span><span id="custodyField">Approved custodian, evidence required</span></div><div class="field"><span>Allowlist</span><span id="allowlistField">Stale, refresh required</span></div><div class="field"><span>Endpoint owner</span><span id="ownerField">Treasury ops queue</span></div></div>
-                <div class="panel"><h3>Fiat fallback SSI</h3><div class="field"><span>Currency</span><span>EUR</span></div><div class="field"><span>Account</span><span class="mono">DE•• •••• •••• 4400</span></div><div class="field"><span>Intermediary</span><span class="mono">INTERDEFFXXX</span></div><div class="field"><span>Status</span><span>Approved fallback route</span></div></div>
-              </div>
-            </section>
-
-            <section id="view-validation" class="view">
-              <div class="screen-title"><div><h2>Endpoint pre-validation</h2><p>Checks run before release. The product validates route readiness, not just field syntax.</p></div><span id="validationBadge" class="pill bad">blocked</span></div>
-              <div class="checks" id="checkList"></div>
-              <div class="note" id="roleNote" style="margin-top:14px"></div>
-            </section>
-
-            <section id="view-decision" class="view">
-              <div class="screen-title"><div><h2>Policy route decision</h2><p>The control tower gives operations an auditable route verdict and repair path.</p></div><span id="decisionBadge" class="pill bad">fallback selected</span></div>
-              <div class="decision-grid">
-                <article id="tokenRoute" class="route blocked"><span class="pill info">requested rail</span><h3>Tokenized deposit route</h3><p id="tokenRouteText">Blocked pending endpoint repair.</p></article>
-                <article id="fiatRoute" class="route selected"><span class="pill info">fallback rail</span><h3>Fiat SSI fallback</h3><p id="fiatRouteText">Selected while endpoint evidence is repaired.</p></article>
-              </div>
-              <div class="note" id="repairText" style="margin-top:14px"></div>
-            </section>
-
-            <section id="view-audit" class="view">
-              <div class="screen-title"><div><h2>Evidence and audit pack</h2><p>Audit-ready trace showing profile source, failed or passed controls, route decision and next operator action.</p></div><span class="pill good mono">UETR SYN-2026-000184</span></div>
-              <div class="ledger" id="auditList"></div>
-              <div class="hero-actions">
-                <button class="btn primary" data-action="downloadReceipt">Download evidence receipt</button>
-                <button class="btn" data-action="download">Download synthetic evidence JSON</button>
-                <button class="btn" data-action="copy">Copy UETR</button>
-              </div>
-              <div class="evidence-box"><pre id="evidenceJson"></pre></div>
-            </section>
-          </div>
-        </section>
-      </section>
-
-      <section class="card">
-        <div class="card-head"><h3>Public-safe wording</h3><span class="pill good">claim-safe</span></div>
-        <div class="card-body note">Settlement Endpoint Control Tower is a synthetic reference demo. It shows how banks could pre-validate identity-bound wallet endpoints beside BIC, LEI/vLEI-style authority, fiat SSI fallback and ISO/UETR-style visibility. It does not claim live payment execution, live payment-network integration, live legal-entity or authority verification, live wallet ownership verification or production compliance.</div>
-      </section>
-    </main>
-  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script>
@@ -484,7 +894,7 @@
           ['bad','Endpoint-control payload','Beneficiary wallet-control field is incomplete.'],
           ['good','Fiat SSI fallback','Fallback route is available and traceable.']
         ],
-        tokenClass: 'blocked', fiatClass: 'selected', tokenText: 'Blocked. Wallet allowlist is stale and endpoint-control evidence is incomplete.', fiatText: 'Selected now. The fiat route remains approved and traceable while the digital endpoint is repaired.', repair: 'Repair task: refresh wallet allowlist and endpoint authority evidence before using the tokenized route.', verdict: 'TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED',
+        tokenClass: 'blocked', fiatClass: 'selected', tokenText: 'Blocked. Wallet allowlist is stale and endpoint-control evidence is incomplete.', fiatText: 'Selected now. The fiat route remains approved and traceable while the digital endpoint is repaired.', repair: 'Repair task: refresh the stale wallet allowlist, complete the endpoint-control payload, and renew the expiring authority evidence before it lapses.', verdict: 'TOKEN_ROUTE_BLOCKED_FIAT_FALLBACK_SELECTED',
         audit: [
           ['Profile loaded','BIC, LEI/vLEI-style authority, wallet endpoint and fallback SSI loaded.','logged'],
           ['Pre-validation started','Tokenized deposit route checked before release.','logged'],
@@ -540,9 +950,18 @@
     function $(id) { return document.getElementById(id); }
     function setPill(el, spec) { el.className = `pill ${spec[0]}`; el.textContent = spec[1]; }
     function showToast(text) { const t = $('toast'); t.textContent = text; t.classList.add('show'); window.clearTimeout(t._timer); t._timer = window.setTimeout(() => t.classList.remove('show'), 2100); }
+    function prefersReducedMotion() { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+    function updateThemeToggle() {
+      const dark = document.documentElement.classList.contains('dark');
+      const toggle = $('themeToggle');
+      toggle.setAttribute('aria-pressed', dark ? 'true' : 'false');
+      toggle.setAttribute('aria-label', 'Dark mode');
+      toggle.title = dark ? 'Disable dark mode' : 'Enable dark mode';
+    }
     function setTheme(theme) {
       document.documentElement.classList.toggle('dark', theme === 'dark');
       try { localStorage.setItem('theme', theme); } catch (e) { /* storage unavailable */ }
+      updateThemeToggle();
     }
     function setScreen(screen) {
       appState.screen = screen;
@@ -553,13 +972,14 @@
       document.querySelectorAll('.tab').forEach(btn => {
         const selected = btn.dataset.screen === screen;
         btn.setAttribute('aria-selected', selected ? 'true' : 'false');
+        btn.tabIndex = selected ? 0 : -1;
         if (selected) btn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       });
     }
     function evidenceBundle(s) {
       return {
         demo: 'Settlement Endpoint Control Tower',
-        build: '2026-07-10-public-reference-v1',
+        build: '2026-07-11-public-landing-v2',
         boundary: 'synthetic_data_only_no_external_network_calls',
         payment_context: { debtor_bic: 'ATLASGSGXXX', creditor_bic: 'MERIDEFFXXX', beneficiary_lei: '549300SYNTHETIC01', uetr: 'SYN-2026-000184', requested_rail: 'tokenized_deposit', fallback_rail: 'fiat_ssi' },
         scenario: appState.scenario,
@@ -574,7 +994,7 @@
         receipt_type: 'settlement_endpoint_control_tower_synthetic_evidence_receipt',
         receipt_id: 'SECT-SYN-2026-000184',
         distribution: 'self_contained_static_demo',
-        build: '2026-07-10-public-reference-v1',
+        build: '2026-07-11-public-landing-v2',
         boundary: {
           data: 'synthetic fixture only',
           runtime: 'static browser app',
@@ -661,6 +1081,13 @@
       }
       appState.timer = window.setTimeout(next, 1050);
     }
+    function replayMoment() {
+      appState.scenario = 'blocked';
+      appState.role = 'operator';
+      play();
+      const consoleSection = $('console');
+      if (consoleSection) consoleSection.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' });
+    }
     function reset() { window.clearTimeout(appState.timer); appState.scenario = 'blocked'; appState.role = 'operator'; appState.walkthroughStep = 0; setScreen('profile'); render(); showToast('Demo reset to blocked endpoint scenario'); }
     function saveJson(payload, filename, message) {
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -674,16 +1101,27 @@
       saveJson(evidenceReceipt(scenarios[appState.scenario]), 'settlement-endpoint-evidence.json', 'Evidence receipt prepared');
     }
     function copyUetr() { navigator.clipboard && navigator.clipboard.writeText('SYN-2026-000184').then(() => showToast('UETR copied')).catch(() => showToast('UETR: SYN-2026-000184')); }
-    document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => { setScreen(btn.dataset.screen); render(); }));
+    const tabButtons = Array.from(document.querySelectorAll('.tab'));
+    tabButtons.forEach(btn => btn.addEventListener('click', () => { setScreen(btn.dataset.screen); render(); }));
+    tabButtons.forEach((btn, index) => btn.addEventListener('keydown', event => {
+      const targets = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: tabButtons.length - 1 };
+      if (!(event.key in targets)) return;
+      event.preventDefault();
+      const next = tabButtons[(targets[event.key] + tabButtons.length) % tabButtons.length];
+      setScreen(next.dataset.screen);
+      render();
+      next.focus();
+    }));
     document.querySelectorAll('[data-goto]').forEach(btn => btn.addEventListener('click', () => { setScreen(btn.dataset.goto); render(); }));
     document.querySelectorAll('[data-action]').forEach(btn => btn.addEventListener('click', () => {
-      const actions = { play, walkthrough: startGuidedMode, nextGuided: nextGuidedStep, reset, download: downloadEvidence, downloadReceipt, copy: copyUetr };
+      const actions = { play, walkthrough: startGuidedMode, nextGuided: nextGuidedStep, reset, download: downloadEvidence, downloadReceipt, copy: copyUetr, replayMoment };
       actions[btn.dataset.action]();
     }))
     $('themeToggle').addEventListener('click', () => setTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark'));
     $('scenarioSelect').addEventListener('change', e => { appState.scenario = e.target.value; render(); showToast(`Scenario: ${e.target.options[e.target.selectedIndex].text}`); });
     $('roleSelect').addEventListener('change', e => { appState.role = e.target.value; render(); showToast(`Role: ${e.target.options[e.target.selectedIndex].text}`); });
-    window.__settlementDemo = { appState, scenarios, walkthroughSteps, setScreen, render, evidenceBundle, evidenceReceipt, startGuidedMode, nextGuidedStep, reset, setTheme };
+    window.__settlementDemo = { appState, scenarios, walkthroughSteps, setScreen, render, evidenceBundle, evidenceReceipt, startGuidedMode, nextGuidedStep, reset, setTheme, replayMoment };
+    updateThemeToggle();
     render();
   </script>
 </body>

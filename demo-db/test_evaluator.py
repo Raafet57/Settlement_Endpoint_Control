@@ -228,7 +228,7 @@ class EvaluatorClaimAccuracyTests(unittest.TestCase):
         self.assertNotIn("stale", decision["token_text"].lower())
         self.assertNotIn("allowlist", decision["token_text"].lower())
 
-    def test_both_blockers_preserve_exact_shipped_text(self) -> None:
+    def test_both_blockers_name_each_required_repair(self) -> None:
         data = current_complete_input()
         data["allowlist_status"] = "stale"
         data["payload_status"] = "incomplete"
@@ -243,7 +243,7 @@ class EvaluatorClaimAccuracyTests(unittest.TestCase):
         )
         self.assertEqual(
             decision["repair_text"],
-            "Repair task: refresh wallet allowlist and endpoint authority evidence before using the tokenized route.",
+            "Repair task: refresh the wallet allowlist and complete the endpoint-control payload before using the tokenized route.",
         )
 
     def test_expiring_soon_is_insufficient_with_non_expired_wording(self) -> None:

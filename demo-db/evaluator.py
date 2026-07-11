@@ -112,7 +112,7 @@ def _blocked_decision(allowlist_stale: bool, payload_incomplete: bool, authority
         # Authority not expired: preserve the exact shipped blocked-scenario text.
         if allowlist_stale and payload_incomplete:
             token_text = "Blocked. Wallet allowlist is stale and endpoint-control evidence is incomplete."
-            repair_text = "Repair task: refresh wallet allowlist and endpoint authority evidence before using the tokenized route."
+            repair_text = "Repair task: refresh the wallet allowlist and complete the endpoint-control payload before using the tokenized route."
         elif allowlist_stale:
             token_text = "Blocked. Wallet allowlist is stale for the requested counterparty and rail."
             repair_text = "Repair task: refresh the wallet allowlist before using the tokenized route."
